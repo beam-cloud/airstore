@@ -520,8 +520,24 @@ func buildRawEmail(to, subject, body, inReplyTo, references string) string {
 	}
 	buf.WriteString("Content-Type: text/plain; charset=UTF-8\r\n")
 	buf.WriteString("\r\n")
-	buf.WriteString(body)
+	buf.WriteString(unwrapBody(body))
 	return buf.String()
+}
+
+// unwrapBody collapses hard line wraps within paragraphs so the email client
+// does its own word wrapping. Double newlines (paragraph breaks) are preserved.
+func unwrapBody(text string) string {
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	blocks := strings.Split(text, "\n\n")
+	var parts []string
+	for _, b := range blocks {
+		b = strings.TrimSpace(b)
+		if b == "" {
+			continue
+		}
+		parts = append(parts, strings.Join(strings.Fields(b), " "))
+	}
+	return strings.Join(parts, "\n\n")
 }
 
 func sanitizeHeaderValue(value string) string {

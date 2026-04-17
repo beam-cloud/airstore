@@ -102,12 +102,18 @@ func TestBuildRawEmail_WithReplyHeaders(t *testing.T) {
 	if !strings.Contains(raw, "Subject: Re: TikTok Partnership\r\n") {
 		t.Errorf("subject should be plain text (not Q-encoded) for ASCII:\n%s", raw)
 	}
+	if !strings.Contains(raw, "Content-Type: text/plain; charset=UTF-8\r\n") {
+		t.Errorf("expected text/plain content type in:\n%s", raw)
+	}
 }
 
 func TestBuildRawEmail_NoReplyHeaders(t *testing.T) {
 	raw := buildRawEmail("to@test.com", "Hello", "Body", "", "")
 	if strings.Contains(raw, "In-Reply-To") || strings.Contains(raw, "References") {
 		t.Errorf("should not have reply headers for new message:\n%s", raw)
+	}
+	if !strings.Contains(raw, "Content-Type: text/plain; charset=UTF-8\r\n") {
+		t.Errorf("expected text/plain content type in:\n%s", raw)
 	}
 }
 
@@ -294,5 +300,48 @@ func TestGmailSendDraftInThread(t *testing.T) {
 	}
 	if got := out["thread_id"]; got != "thread-123" {
 		t.Errorf("output thread_id = %v, want thread-123", got)
+	}
+}
+
+func TestUnwrapBody(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name:  "single line unchanged",
+			input: "Hello world",
+			want:  "Hello world",
+		},
+		{
+			name:  "hard wraps collapsed",
+			input: "I am working on behalf of an experienced\nlaundromat operator who is\nlooking to open a new location.",
+			want:  "I am working on behalf of an experienced laundromat operator who is looking to open a new location.",
+		},
+		{
+			name:  "paragraph breaks preserved",
+			input: "Hi Ryan,\n\nI am working on behalf of an experienced\nlaundromat operator.\n\nThank you,\nEli",
+			want:  "Hi Ryan,\n\nI am working on behalf of an experienced laundromat operator.\n\nThank you, Eli",
+		},
+		{
+			name:  "crlf normalized",
+			input: "First paragraph.\r\n\r\nSecond paragraph.",
+			want:  "First paragraph.\n\nSecond paragraph.",
+		},
+		{
+			name:  "extra blank lines collapsed",
+			input: "\n\nHello\n\n\n\nWorld\n\n",
+			want:  "Hello\n\nWorld",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := unwrapBody(tt.input)
+			if got != tt.want {
+				t.Errorf("unwrapBody():\n got: %q\nwant: %q", got, tt.want)
+			}
+		})
 	}
 }

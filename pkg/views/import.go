@@ -107,8 +107,17 @@ func ImportData(ctx context.Context, p ImportParams) (*ImportResult, error) {
 		})
 	}
 
-	if err := p.Store.UpsertRows(ctx, p.ViewID, rows); err != nil {
-		return nil, fmt.Errorf("upsert rows: %w", err)
+	const importBatchSize = 2000
+	for i := 0; i < len(rows); i += importBatchSize {
+		end := i + importBatchSize
+		if end > len(rows) {
+			end = len(rows)
+		}
+		batch := rows[i:end]
+		if err := p.Store.UpsertRowsNoEmbed(ctx, p.ViewID, batch); err != nil {
+			return nil, fmt.Errorf("upsert rows batch %d-%d: %w", i, end, err)
+		}
+		log.Info().Str("view_id", p.ViewID).Int("batch_start", i).Int("batch_end", end).Int("total", len(rows)).Msg("import: batch upserted")
 	}
 
 	keepIDs := make([]string, len(rows))
@@ -117,6 +126,13 @@ func ImportData(ctx context.Context, p ImportParams) (*ImportResult, error) {
 	}
 	if stale, err := p.Store.CleanupStaleImportRows(ctx, p.ViewID, p.SheetID, p.ComponentID, keepIDs); err == nil && stale > 0 {
 		log.Info().Str("view_id", p.ViewID).Int64("cleaned", stale).Msg("import: removed stale rows")
+	}
+
+	// Embeddings are generated asynchronously so the import response returns fast.
+	// The vector index + embeddings will be ready for copilot vector search shortly after.
+	if ec := p.Store.Embedder(); ec != nil && ec.Available() {
+		_ = p.Store.EnsureVectorIndex(ctx, p.ViewID, ec.Dims())
+		p.Store.EmbedRowsAsync(p.ViewID)
 	}
 
 	newColKeys := make([]string, len(newCols))

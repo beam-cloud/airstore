@@ -1119,6 +1119,7 @@ func TestAssembleTableIncludesTaskWakeMetadata(t *testing.T) {
 				},
 			},
 		},
+		"", 0, 0,
 	)
 
 	if got, want := resolved.Status, types.ResolvedDataStatusOK; got != want {

@@ -18,6 +18,11 @@ import (
 
 const ViewSyncTimeout = 90 * time.Second
 
+// minColumnOverlap is the minimum number of shared column keys between a
+// source and target sheet for cross-sheet sync to proceed. Prevents updates
+// from being inserted into unrelated sheets (e.g. outreach → laundromats).
+const minColumnOverlap = 2
+
 type ViewSyncOpts struct {
 	Store   *ViewStore
 	Backend repository.BackendRepository
@@ -115,7 +120,68 @@ func (vs *ViewSync) Sync(ctx context.Context, output *types.TaskOutput) *SyncRes
 		return nil
 	}
 
-	// Group schemas by view so each view gets its own timeout budget.
+	// Identify the source sheet from output metadata so we can filter
+	// target sheets by column overlap (same logic as SyncToolWrite).
+	sourceSheetID := ""
+	if output.Metadata != nil {
+		if v, ok := output.Metadata[types.TaskOutputMetadataViewSchemaSheetID]; ok {
+			if s, ok := v.(string); ok {
+				sourceSheetID = strings.TrimSpace(s)
+			}
+		}
+	}
+
+	// Build a column-key set for the source sheet.
+	var sourceKeys map[string]struct{}
+	if sourceSheetID != "" {
+		for _, sc := range schemas {
+			if sc.SheetID == sourceSheetID {
+				sourceKeys = make(map[string]struct{}, len(sc.Columns))
+				for _, k := range sc.ColumnKeys() {
+					sourceKeys[k] = struct{}{}
+				}
+				break
+			}
+		}
+	}
+
+	// When no source sheet is identified from metadata, infer it by finding
+	// the sheet with the most column overlap with the output's data keys.
+	// This prevents email/json outputs from being synced to unrelated sheets
+	// when the source sheet metadata is missing.
+	if sourceKeys == nil && len(schemas) > 1 {
+		dataKeys := outputDataKeys(output)
+		if len(dataKeys) > 0 {
+			bestOverlap := 0
+			bestSheet := ""
+			for _, sc := range schemas {
+				overlap := 0
+				for _, k := range sc.ColumnKeys() {
+					if _, ok := dataKeys[k]; ok {
+						overlap++
+					}
+				}
+				if overlap > bestOverlap {
+					bestOverlap = overlap
+					bestSheet = sc.SheetID
+					sourceKeys = make(map[string]struct{}, len(sc.Columns))
+					for _, k := range sc.ColumnKeys() {
+						sourceKeys[k] = struct{}{}
+					}
+					sourceSheetID = sc.SheetID
+				}
+			}
+			if bestSheet != "" {
+				log.Debug().
+					Str("task_id", output.TaskID).
+					Str("inferred_sheet", bestSheet).
+					Int("overlap", bestOverlap).
+					Msg("viewsync: inferred source sheet from output data keys")
+			}
+		}
+	}
+
+	// Group schemas by view, filtering out sheets with low column overlap.
 	viewSchemas := make(map[string][]types.ViewOutputSchemaContext)
 	var viewOrder []string
 	for _, sc := range schemas {
@@ -124,6 +190,22 @@ func (vs *ViewSync) Sync(ctx context.Context, output *types.TaskOutput) *SyncRes
 		}
 		if targetViewID != "" && sc.ViewID != targetViewID {
 			continue
+		}
+		if sourceKeys != nil && sc.SheetID != sourceSheetID {
+			overlap := 0
+			for _, k := range sc.ColumnKeys() {
+				if _, ok := sourceKeys[k]; ok {
+					overlap++
+				}
+			}
+			if overlap < minColumnOverlap {
+				log.Debug().
+					Str("view_id", sc.ViewID).
+					Str("sheet", sc.SheetName).
+					Int("overlap", overlap).
+					Msg("viewsync: skipping sheet with low column overlap")
+				continue
+			}
 		}
 		if _, seen := viewSchemas[sc.ViewID]; !seen {
 			viewOrder = append(viewOrder, sc.ViewID)
@@ -141,6 +223,12 @@ func (vs *ViewSync) Sync(ctx context.Context, output *types.TaskOutput) *SyncRes
 		Int("views", len(viewOrder)).
 		Msg("viewsync: Sync invoked")
 
+	// Creating new rows from freeform task outputs is only safe when we know the
+	// source sheet AND the output is row-creation-friendly. Email artifacts, for
+	// example, may update an existing row but should never synthesize a new CRM
+	// record from prose.
+	insertAllowed := sourceSheetID != "" && outputAllowsInsert(output)
+
 	ch := make(chan *SyncResult, len(viewOrder))
 	for _, viewID := range viewOrder {
 		go func(vid string) {
@@ -153,7 +241,7 @@ func (vs *ViewSync) Sync(ctx context.Context, output *types.TaskOutput) *SyncRes
 				}
 				mu := vs.lockFor(output.TaskID, sc.SheetID)
 				mu.Lock()
-				r := vs.syncSchema(viewCtx, output, sc, viewSchemas[vid])
+				r := vs.syncSchema(viewCtx, output, sc, viewSchemas[vid], insertAllowed)
 				mu.Unlock()
 				vr.merge(r)
 			}
@@ -197,8 +285,9 @@ func (vs *ViewSync) SyncToolWrite(ctx context.Context, input ToolWriteInput) *Sy
 		return nil
 	}
 
+	var sourceSchema *types.ViewOutputSchemaContext
 	var allSchemas []types.ViewOutputSchemaContext
-	var targetSchemas []types.ViewOutputSchemaContext
+	var candidateSchemas []types.ViewOutputSchemaContext
 	for _, sheet := range view.Definition.Sheets {
 		for _, comp := range sheet.Components {
 			if !comp.IsTable() {
@@ -209,11 +298,44 @@ func (vs *ViewSync) SyncToolWrite(ctx context.Context, input ToolWriteInput) *Sy
 				continue
 			}
 			allSchemas = append(allSchemas, *sc)
-			if sheet.ID != input.SourceSheetID || comp.ID != input.SourceComponentID {
-				targetSchemas = append(targetSchemas, *sc)
+			if sheet.ID == input.SourceSheetID && comp.ID == input.SourceComponentID {
+				sourceSchema = sc
+			} else {
+				candidateSchemas = append(candidateSchemas, *sc)
 			}
 		}
 	}
+
+	// Filter targets to only sheets with meaningful column overlap with the
+	// source. Without this, updates to one sheet get inserted as new rows in
+	// unrelated sheets (e.g. outreach properties → laundromat venues).
+	var targetSchemas []types.ViewOutputSchemaContext
+	if sourceSchema != nil {
+		sourceKeys := make(map[string]struct{}, len(sourceSchema.Columns))
+		for _, k := range sourceSchema.ColumnKeys() {
+			sourceKeys[k] = struct{}{}
+		}
+		for _, sc := range candidateSchemas {
+			overlap := 0
+			for _, k := range sc.ColumnKeys() {
+				if _, ok := sourceKeys[k]; ok {
+					overlap++
+				}
+			}
+			if overlap >= minColumnOverlap {
+				targetSchemas = append(targetSchemas, sc)
+			} else {
+				log.Debug().
+					Str("view_id", input.ViewID).
+					Str("sheet", sc.SheetName).
+					Int("overlap", overlap).
+					Msg("viewsync-tool: skipping sheet with low column overlap")
+			}
+		}
+	} else {
+		targetSchemas = candidateSchemas
+	}
+
 	if len(targetSchemas) == 0 {
 		log.Debug().Str("view_id", input.ViewID).Int("all_schemas", len(allSchemas)).Msg("viewsync-tool: no target sheets")
 		return &SyncResult{Skipped: true}
@@ -259,7 +381,7 @@ func (vs *ViewSync) SyncToolWrite(ctx context.Context, input ToolWriteInput) *Sy
 		if input.ForceInsert {
 			r = vs.syncSchemaInsertOnly(viewCtx, output, sc, allSchemas)
 		} else {
-			r = vs.syncSchema(viewCtx, output, sc, allSchemas)
+			r = vs.syncSchema(viewCtx, output, sc, allSchemas, true)
 		}
 		mu.Unlock()
 		result.merge(r)
@@ -307,11 +429,13 @@ func (vs *ViewSync) syncSchemaInsertOnly(
 // syncSchema handles resolution and upsert/insert for a single sheet.
 // allSchemas is the full set of schema contexts across the view, used to
 // gather cross-sheet context when inserting into a sheet that has no data yet.
+// insertAllowed controls whether new rows can be created (false = update-only).
 func (vs *ViewSync) syncSchema(
 	ctx context.Context,
 	output *types.TaskOutput,
 	sc types.ViewOutputSchemaContext,
 	allSchemas []types.ViewOutputSchemaContext,
+	insertAllowed bool,
 ) *SyncResult {
 	cols := bamlColumns(sc)
 	keys := sc.ColumnKeys()
@@ -322,9 +446,9 @@ func (vs *ViewSync) syncSchema(
 	ec := vs.store.Embedder()
 
 	if ec != nil && ec.Available() {
-		return vs.syncVectorPath(ctx, output, sc, cols, keys, data, summary, ec, allSchemas, viewCtxStr)
+		return vs.syncVectorPath(ctx, output, sc, cols, keys, data, summary, ec, allSchemas, viewCtxStr, insertAllowed)
 	}
-	return vs.syncFallbackPath(ctx, output, sc, cols, keys, data, summary, viewCtxStr)
+	return vs.syncFallbackPath(ctx, output, sc, cols, keys, data, summary, viewCtxStr, insertAllowed)
 }
 
 // syncVectorPath uses embedding-based resolution: vector search partitioned
@@ -342,6 +466,7 @@ func (vs *ViewSync) syncVectorPath(
 	ec *EmbeddingClient,
 	allSchemas []types.ViewOutputSchemaContext,
 	viewCtxStr string,
+	insertAllowed bool,
 ) *SyncResult {
 	result := &SyncResult{}
 
@@ -360,7 +485,7 @@ func (vs *ViewSync) syncVectorPath(
 	results, err := vs.vectorCandidates(ctx, sc, ec, queries)
 	if err != nil {
 		log.Warn().Err(err).Str("task_id", output.TaskID).Msg("viewsync: search failed, falling back")
-		return vs.syncFallbackPath(ctx, output, sc, cols, keys, data, summary, viewCtxStr)
+		return vs.syncFallbackPath(ctx, output, sc, cols, keys, data, summary, viewCtxStr, insertAllowed)
 	}
 
 	var candidates []ViewRow
@@ -384,6 +509,51 @@ func (vs *ViewSync) syncVectorPath(
 		Int("moderate", moderateCandidates).
 		Msg("viewsync: scored")
 
+	// Text search fallback: when vector search returned no candidates (e.g.
+	// embeddings not yet computed after a large import), try column-level text
+	// search using PlanRowSearch criteria before deciding to insert. Uses
+	// criteria first, then entity hints as a secondary search.
+	if len(candidates) == 0 {
+		candidateByID := make(map[string]ViewRow)
+
+		if len(criteria) > 0 {
+			if textRows, err := vs.store.SearchRows(ctx, sc.ViewID, sc.SheetID, sc.ComponentID, criteria, 20); err == nil {
+				for _, row := range textRows {
+					candidateByID[row.ID] = row
+				}
+			}
+		}
+
+		// Entity hints (e.g. "201 3rd St") searched across identity columns.
+		if len(candidateByID) == 0 {
+			for _, hint := range hints {
+				hint = strings.TrimSpace(hint)
+				if hint == "" || len(hint) < 3 {
+					continue
+				}
+				hintCriteria := hintToSearchCriteria(hint, cols)
+				if len(hintCriteria) > 0 {
+					if hintRows, err := vs.store.SearchRows(ctx, sc.ViewID, sc.SheetID, sc.ComponentID, hintCriteria, 10); err == nil {
+						for _, row := range hintRows {
+							candidateByID[row.ID] = row
+						}
+					}
+				}
+			}
+		}
+
+		if len(candidateByID) > 0 {
+			for _, row := range candidateByID {
+				candidates = append(candidates, row)
+			}
+			log.Debug().
+				Str("task_id", output.TaskID).
+				Str("sheet_id", sc.SheetID).
+				Int("text_hits", len(candidates)).
+				Msg("viewsync: vector empty, text search found candidates")
+		}
+	}
+
 	if len(candidates) > 0 {
 		updated, unmatched := vs.classifyCandidateRows(ctx, output, sc, cols, keys, data, summary, candidates, viewCtxStr)
 		result.Updated = append(result.Updated, updated...)
@@ -393,9 +563,15 @@ func (vs *ViewSync) syncVectorPath(
 		hints = entityHints(&plan, unmatched)
 	}
 
+	if !insertAllowed {
+		log.Debug().
+			Str("task_id", output.TaskID).
+			Str("sheet_id", sc.SheetID).
+			Msg("viewsync: no match found but insert disabled (source sheet unknown)")
+		return result
+	}
+
 	// Path C: no existing rows matched in this sheet -> insert new row(s).
-	// Gather cross-sheet context via vector search so BAML can enrich the
-	// new row with data from related rows in other sheets (e.g. seed data).
 	crossCtx := vs.crossSheetContext(ctx, sc, ec, queries, allSchemas)
 
 	created, err := vs.insertRows(ctx, output, sc, cols, data, summary, &plan, hints, crossCtx, viewCtxStr)
@@ -591,6 +767,7 @@ func (vs *ViewSync) syncFallbackPath(
 	keys []string,
 	data, summary string,
 	viewCtxStr string,
+	insertAllowed bool,
 ) *SyncResult {
 	result := &SyncResult{}
 
@@ -610,6 +787,13 @@ func (vs *ViewSync) syncFallbackPath(
 	}
 
 	if len(candidates) == 0 {
+		if !insertAllowed {
+			log.Debug().
+				Str("task_id", output.TaskID).
+				Str("sheet_id", sc.SheetID).
+				Msg("viewsync: fallback no match, insert disabled")
+			return result
+		}
 		created, err := vs.insertRows(ctx, output, sc, cols, data, summary, &plan, nil, "", viewCtxStr)
 		if err != nil {
 			log.Warn().Err(err).Str("task_id", output.TaskID).Msg("viewsync: insert failed")
@@ -621,7 +805,7 @@ func (vs *ViewSync) syncFallbackPath(
 	updated, unmatched := vs.classifyCandidateRows(ctx, output, sc, cols, keys, data, summary, candidates, viewCtxStr)
 	result.Updated = append(result.Updated, updated...)
 
-	if !result.changed() {
+	if !result.changed() && insertAllowed {
 		created, err := vs.insertRows(ctx, output, sc, cols, data, summary, &plan, unmatched, "", viewCtxStr)
 		if err != nil {
 			log.Warn().Err(err).Str("task_id", output.TaskID).Msg("viewsync: insert failed")

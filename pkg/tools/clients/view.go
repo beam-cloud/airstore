@@ -310,23 +310,14 @@ func (c *ViewClient) listRows(ctx context.Context, viewID string, workspaceID ui
 	}
 	offset := GetIntArg(args, "offset", 0)
 
-	rows, err := c.store.GetRows(ctx, viewID, sheetID, componentID)
+	rows, total, err := c.store.GetRowsPage(ctx, viewID, sheetID, componentID, offset, limit)
 	if err != nil {
 		return WriteToolError(stdout, fmt.Sprintf("failed to load rows: %v", err))
 	}
 
 	schemaCols := c.schemaColumns(ctx, workspaceID, viewID, sheetID, componentID)
 
-	if offset > 0 && offset < len(rows) {
-		rows = rows[offset:]
-	} else if offset >= len(rows) {
-		rows = nil
-	}
-	if len(rows) > limit {
-		rows = rows[:limit]
-	}
-
-	return c.writeRows(stdout, rows, schemaCols)
+	return c.writeRowsWithTotal(stdout, rows, schemaCols, total, offset)
 }
 
 func (c *ViewClient) getRow(ctx context.Context, viewID string, workspaceID uint, args map[string]any, stdout io.Writer) error {
@@ -434,18 +425,15 @@ func (c *ViewClient) updateRow(ctx context.Context, viewID string, workspaceID u
 	if c.sync != nil {
 		row, err := c.store.GetRowByID(ctx, viewID, rowID)
 		if err == nil && row != nil {
-			sr := c.sync.SyncToolWrite(ctx, views.ToolWriteInput{
+			input := views.ToolWriteInput{
 				ViewID:            viewID,
 				WorkspaceID:       workspaceID,
 				SourceSheetID:     row.SheetID,
 				SourceComponentID: row.ComponentID,
 				Cells:             row.MergedCells(),
 				RowID:             rowID,
-			})
-			if sr != nil {
-				resp["cross_sheet_updated"] = len(sr.Updated)
-				resp["cross_sheet_created"] = len(sr.Created)
 			}
+			go c.sync.SyncToolWrite(context.Background(), input)
 		}
 	}
 
@@ -499,59 +487,40 @@ func (c *ViewClient) addRow(ctx context.Context, viewID string, workspaceID uint
 	}
 
 	if c.sync != nil {
-		sr := c.sync.SyncToolWrite(ctx, views.ToolWriteInput{
+		input := views.ToolWriteInput{
 			ViewID:            viewID,
 			WorkspaceID:       workspaceID,
 			SourceSheetID:     sheetID,
 			SourceComponentID: componentID,
 			Cells:             cells,
 			RowID:             rowID,
-		})
-		if sr != nil {
-			resp["cross_sheet_updated"] = len(sr.Updated)
-			resp["cross_sheet_created"] = len(sr.Created)
 		}
+		go c.sync.SyncToolWrite(context.Background(), input)
 	}
 
 	return WriteJSON(stdout, resp)
 }
 
-// smartUpsertRow uses vector search to find semantically matching rows on the
-// target sheet before inserting. If a high-confidence match is found, a BAML
-// classifier verifies entity identity before merging to prevent false matches
-// (e.g. "100 Greene Ave" vs "101 Greene Ave").
-// Returns (rowID, created, matchedExisting, error).
+// smartUpsertRow finds an existing row on the target sheet that represents the
+// same entity as the incoming cells, and updates it. Uses three search
+// strategies in priority order:
+//
+//  1. Vector search — semantic similarity when embeddings exist
+//  2. Identity text search — AND-based column match on identity-defining fields
+//     (address, name, etc.), ignoring attribute fields (email, status, rent)
+//  3. deriveRowKey fallback — hash-based match via UpsertRow
+//
+// A BAML classifier verifies entity identity before merging to prevent false
+// matches (e.g. "100 Greene Ave" vs "101 Greene Ave").
 func (c *ViewClient) smartUpsertRow(
 	ctx context.Context,
 	viewID, sheetID, componentID string,
 	workspaceID uint,
 	cells map[string]string,
 ) (string, bool, bool, error) {
-	ec := c.store.Embedder()
-	if ec == nil || !ec.Available() {
-		rowID, created, err := c.store.UpsertRow(ctx, viewID, sheetID, componentID, cells, views.UpsertOpts{})
-		return rowID, created, false, err
-	}
-
 	tempRow := &views.ViewRow{Cells: cells}
 	searchText := views.RowSearchText(tempRow)
 	if searchText == "" {
-		rowID, created, err := c.store.UpsertRow(ctx, viewID, sheetID, componentID, cells, views.UpsertOpts{})
-		return rowID, created, false, err
-	}
-
-	_ = c.store.EnsureVectorIndex(ctx, viewID, ec.Dims())
-
-	queryVec, err := ec.EmbedOne(ctx, searchText)
-	if err != nil {
-		log.Debug().Err(err).Msg("view-tool: embed failed, falling back to content-hash upsert")
-		rowID, created, err := c.store.UpsertRow(ctx, viewID, sheetID, componentID, cells, views.UpsertOpts{})
-		return rowID, created, false, err
-	}
-
-	results, err := c.store.VectorSearch(ctx, viewID, sheetID, queryVec, 10)
-	if err != nil {
-		log.Debug().Err(err).Msg("view-tool: vector search failed, falling back")
 		rowID, created, err := c.store.UpsertRow(ctx, viewID, sheetID, componentID, cells, views.UpsertOpts{})
 		return rowID, created, false, err
 	}
@@ -561,11 +530,46 @@ func (c *ViewClient) smartUpsertRow(
 		classifyFloor = c.sync.ClassifyFloor()
 	}
 
-	var candidates []views.VectorSearchResult
-	for _, r := range results {
-		if r.Score >= classifyFloor {
-			candidates = append(candidates, r)
+	candidateByID := make(map[string]views.VectorSearchResult)
+
+	// --- Strategy 1: Vector search (semantic, works when embeddings exist) ---
+	ec := c.store.Embedder()
+	if ec != nil && ec.Available() {
+		_ = c.store.EnsureVectorIndex(ctx, viewID, ec.Dims())
+		if queryVec, err := ec.EmbedOne(ctx, searchText); err == nil {
+			if results, err := c.store.VectorSearch(ctx, viewID, sheetID, queryVec, 10); err == nil {
+				for _, r := range results {
+					if r.Score >= classifyFloor {
+						candidateByID[r.ID] = r
+					}
+				}
+			}
 		}
+	}
+
+	// --- Strategy 2: Identity text search (AND logic on identity columns) ---
+	// This catches exact matches even when embeddings aren't ready.
+	idCriteria := identityCriteria(cells)
+	if len(idCriteria) >= 2 {
+		if rows, err := c.store.SearchRowsAnd(ctx, viewID, sheetID, "", idCriteria, 10); err == nil {
+			for _, row := range rows {
+				if _, exists := candidateByID[row.ID]; !exists {
+					candidateByID[row.ID] = views.VectorSearchResult{ViewRow: row}
+				}
+			}
+		}
+	}
+
+	// Cap candidates to avoid overwhelming the classifier.
+	candidates := make([]views.VectorSearchResult, 0, len(candidateByID))
+	for _, r := range candidateByID {
+		candidates = append(candidates, r)
+	}
+	if len(candidates) > 15 {
+		sort.Slice(candidates, func(i, j int) bool {
+			return candidates[i].Score > candidates[j].Score
+		})
+		candidates = candidates[:15]
 	}
 
 	if len(candidates) > 0 {
@@ -576,6 +580,8 @@ func (c *ViewClient) smartUpsertRow(
 			} else {
 				log.Debug().
 					Str("row_id", targetID).
+					Int("vector_hits", len(candidateByID)).
+					Int("identity_criteria", len(idCriteria)).
 					Int("candidates", len(candidates)).
 					Msg("view-tool: classifier confirmed match, merged")
 				return targetID, false, true, nil
@@ -583,12 +589,75 @@ func (c *ViewClient) smartUpsertRow(
 		} else {
 			log.Debug().
 				Int("candidates", len(candidates)).
-				Msg("view-tool: classifier said INSERT_NEW, skipping vector matches")
+				Msg("view-tool: classifier said INSERT_NEW, skipping matches")
 		}
 	}
 
+	// --- Strategy 3: deriveRowKey fallback (hash-based) ---
 	rowID, created, err := c.store.UpsertRow(ctx, viewID, sheetID, componentID, cells, views.UpsertOpts{})
 	return rowID, created, false, err
+}
+
+// identityCriteria selects cell values that define entity IDENTITY (address,
+// name, location) and skips attribute values (email, status, rent, phone).
+// Returns criteria suitable for AND-based search. The goal is a small set
+// (2-4) of values that uniquely identify the row.
+func identityCriteria(cells map[string]string) []views.SearchCriterion {
+	type entry struct {
+		key string
+		val string
+	}
+	var entries []entry
+	for k, v := range cells {
+		v = strings.TrimSpace(v)
+		if v == "" || len(v) < 3 {
+			continue
+		}
+		if isAttributeColumn(k) {
+			continue
+		}
+		entries = append(entries, entry{k, v})
+	}
+	// Sort by value length descending — longer values are more specific.
+	sort.Slice(entries, func(i, j int) bool {
+		return len(entries[i].val) > len(entries[j].val)
+	})
+	// Use up to 4 identity criteria for AND search.
+	if len(entries) > 4 {
+		entries = entries[:4]
+	}
+	criteria := make([]views.SearchCriterion, len(entries))
+	for i, e := range entries {
+		criteria[i] = views.SearchCriterion{Column: e.key, Value: e.val}
+	}
+	return criteria
+}
+
+// isAttributeColumn returns true for column keys that describe attributes
+// (shared across many rows) rather than entity identity. These are skipped
+// during dedup search to avoid flooding results.
+func isAttributeColumn(key string) bool {
+	if strings.HasPrefix(key, "_") {
+		return true
+	}
+	k := strings.ToLower(key)
+	switch {
+	case strings.Contains(k, "email"):
+		return true
+	case strings.Contains(k, "phone"):
+		return true
+	case strings.Contains(k, "status"):
+		return true
+	case strings.Contains(k, "thread"):
+		return true
+	case k == "asking_rent" || k == "rent" || k == "price":
+		return true
+	case strings.Contains(k, "broker") || strings.Contains(k, "agent"):
+		return true
+	case k == "source" || k == "notes" || k == "comments":
+		return true
+	}
+	return false
 }
 
 // classifyRowMatch calls the BAML ClassifyRowMatch function to verify whether
@@ -723,6 +792,32 @@ func (c *ViewClient) writeRows(stdout io.Writer, rows []views.ViewRow, schemaCol
 	return WriteJSON(stdout, map[string]any{
 		"total": len(out),
 		"rows":  out,
+	})
+}
+
+func (c *ViewClient) writeRowsWithTotal(stdout io.Writer, rows []views.ViewRow, schemaCols map[string]string, total, offset int) error {
+	type outputRow struct {
+		ID     string            `json:"row_id"`
+		RowKey string            `json:"row_key,omitempty"`
+		Cells  map[string]string `json:"cells"`
+	}
+
+	out := make([]outputRow, 0, len(rows))
+	for _, row := range rows {
+		merged := row.MergedCells()
+		filtered := filterCells(merged, schemaCols)
+		out = append(out, outputRow{
+			ID:     row.ID,
+			RowKey: row.RowKey,
+			Cells:  filtered,
+		})
+	}
+
+	return WriteJSON(stdout, map[string]any{
+		"total":    total,
+		"offset":   offset,
+		"returned": len(out),
+		"rows":     out,
 	})
 }
 

@@ -269,7 +269,7 @@ func (s *SourceService) handleFollowupDirectDelivery(
 		if content := s.contextEnricher.FetchSourceContent(ctx, workspaceID, query.Integration, enrichData); content != "" {
 			message = message + "\n\n" + content
 		}
-		if viewRows := s.contextEnricher.FetchViewRows(ctx, workspaceID, *hook.TargetTaskID); viewRows != "" {
+		if viewRows := s.contextEnricher.FetchViewRows(ctx, workspaceID, *hook.TargetTaskID, message); viewRows != "" {
 			message = message + "\n\n" + viewRows
 		}
 	}

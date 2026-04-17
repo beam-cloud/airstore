@@ -130,39 +130,32 @@ func (r *PostgresBackend) EnsureWorkspaceServiceToken(ctx context.Context, works
 }
 
 func (r *PostgresBackend) ValidateToken(ctx context.Context, rawToken string) (*types.TokenValidationResult, error) {
-	// Try workspace member tokens (has workspace_id and member_id)
-	result, err := r.validateMemberToken(ctx, rawToken)
-	if err == nil && result != nil {
-		return result, nil
-	}
-
-	// Try workspace service tokens (has workspace_id, no member_id)
-	result, err = r.validateServiceToken(ctx, rawToken)
-	if err == nil && result != nil {
-		return result, nil
-	}
-
-	// Try organization tokens (tenant-scoped, no workspace_id)
-	result, err = r.validateOrganizationToken(ctx, rawToken)
-	if err == nil && result != nil {
-		return result, nil
-	}
-
-	// Try worker tokens (cluster-level, no workspace_id or member_id)
-	return r.validateWorkerToken(ctx, rawToken)
-}
-
-func (r *PostgresBackend) validateMemberToken(ctx context.Context, rawToken string) (*types.TokenValidationResult, error) {
-	// Try fast path: use token_prefix for indexed lookup (O(1) instead of O(n) bcrypt)
+	// Fast path: try prefix-based O(1) lookups across all token types first.
+	// This avoids falling through to the O(n) bcrypt scan methods which compare
+	// against every legacy token without a stored prefix (~100ms per comparison).
 	if len(rawToken) >= tokenPrefixLen {
-		result, err := r.validateMemberTokenByPrefix(ctx, rawToken)
-		if err == nil && result != nil {
+		if result, err := r.validateMemberTokenByPrefix(ctx, rawToken); err == nil && result != nil {
+			return result, nil
+		}
+		if result, err := r.validateServiceTokenByPrefix(ctx, rawToken); err == nil && result != nil {
+			return result, nil
+		}
+		if result, err := r.validateOrganizationToken(ctx, rawToken); err == nil && result != nil {
+			return result, nil
+		}
+		if result, err := r.validateWorkerTokenByPrefix(ctx, rawToken); err == nil && result != nil {
 			return result, nil
 		}
 	}
 
-	// Fallback: scan all tokens for legacy tokens without prefix
-	return r.validateMemberTokenScan(ctx, rawToken)
+	// Slow path: scan legacy tokens that don't have a stored prefix.
+	if result, err := r.validateMemberTokenScan(ctx, rawToken); err == nil && result != nil {
+		return result, nil
+	}
+	if result, err := r.validateServiceTokenScan(ctx, rawToken); err == nil && result != nil {
+		return result, nil
+	}
+	return r.validateWorkerTokenScan(ctx, rawToken)
 }
 
 // validateMemberTokenByPrefix uses the token_prefix column for O(1) lookup.
@@ -307,20 +300,6 @@ func (r *PostgresBackend) validateMemberTokenScan(ctx context.Context, rawToken 
 	return nil, fmt.Errorf("invalid token")
 }
 
-// validateServiceToken validates workspace service tokens (workspace-scoped, no member).
-func (r *PostgresBackend) validateServiceToken(ctx context.Context, rawToken string) (*types.TokenValidationResult, error) {
-	// Try fast path: use token_prefix for indexed lookup
-	if len(rawToken) >= tokenPrefixLen {
-		result, err := r.validateServiceTokenByPrefix(ctx, rawToken)
-		if err == nil && result != nil {
-			return result, nil
-		}
-	}
-
-	// Fallback: scan legacy tokens without prefix
-	return r.validateServiceTokenScan(ctx, rawToken)
-}
-
 func (r *PostgresBackend) validateServiceTokenByPrefix(ctx context.Context, rawToken string) (*types.TokenValidationResult, error) {
 	prefix := rawToken[:tokenPrefixLen]
 
@@ -434,19 +413,6 @@ func (r *PostgresBackend) validateServiceTokenScan(ctx context.Context, rawToken
 	}
 
 	return nil, fmt.Errorf("invalid token")
-}
-
-func (r *PostgresBackend) validateWorkerToken(ctx context.Context, rawToken string) (*types.TokenValidationResult, error) {
-	// Try fast path: use token_prefix for indexed lookup
-	if len(rawToken) >= tokenPrefixLen {
-		result, err := r.validateWorkerTokenByPrefix(ctx, rawToken)
-		if err == nil && result != nil {
-			return result, nil
-		}
-	}
-
-	// Fallback: scan legacy tokens without prefix
-	return r.validateWorkerTokenScan(ctx, rawToken)
 }
 
 func (r *PostgresBackend) validateWorkerTokenByPrefix(ctx context.Context, rawToken string) (*types.TokenValidationResult, error) {

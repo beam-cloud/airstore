@@ -166,6 +166,204 @@ func (s *ViewStore) GetRows(ctx context.Context, viewID, sheetID, componentID st
 	return rows, nil
 }
 
+// GetRowsPage returns a paginated slice of rows and the total count.
+// Uses MongoDB Skip/Limit for server-side pagination.
+func (s *ViewStore) GetRowsPage(ctx context.Context, viewID, sheetID, componentID string, offset, limit int) ([]ViewRow, int, error) {
+	if !s.Available() {
+		return nil, 0, nil
+	}
+	coll := s.mongo.Collection(s.collectionName(viewID))
+	filter := rowScopeFilter(sheetID, componentID)
+	filter = append(filter, bson.E{Key: "_id", Value: bson.D{{Key: "$not", Value: bson.D{{Key: "$regex", Value: "^__"}}}}})
+
+	total, err := coll.CountDocuments(ctx, filter)
+	if err != nil {
+		return nil, 0, fmt.Errorf("count rows: %w", err)
+	}
+
+	if offset < 0 {
+		offset = 0
+	}
+	if limit <= 0 {
+		limit = 50
+	}
+
+	opts := options.Find().
+		SetSkip(int64(offset)).
+		SetLimit(int64(limit)).
+		SetSort(bson.D{{Key: "updated_at", Value: -1}})
+
+	cursor, err := coll.Find(ctx, filter, opts)
+	if err != nil {
+		return nil, int(total), fmt.Errorf("find rows page: %w", err)
+	}
+	defer cursor.Close(ctx)
+
+	var rows []ViewRow
+	if err := cursor.All(ctx, &rows); err != nil {
+		return nil, int(total), fmt.Errorf("decode rows page: %w", err)
+	}
+
+	log.Debug().
+		Str("view_id", viewID).
+		Str("sheet_id", sheetID).
+		Int("offset", offset).
+		Int("limit", limit).
+		Int("returned", len(rows)).
+		Int("total", int(total)).
+		Msg("view: loaded rows page")
+	return rows, int(total), nil
+}
+
+// SearchRowsText performs a case-insensitive free-text search across the
+// search_text field (populated by autoEmbed) and falls back to a regex scan
+// across all cell values. Returns paginated results with total count.
+func (s *ViewStore) SearchRowsText(ctx context.Context, viewID, sheetID, componentID, query string, offset, limit int) ([]ViewRow, int, error) {
+	if !s.Available() || strings.TrimSpace(query) == "" {
+		return nil, 0, nil
+	}
+	coll := s.mongo.Collection(s.collectionName(viewID))
+
+	// Split query into meaningful words and require ALL to appear in
+	// search_text. Stop words and very short tokens are filtered so that
+	// queries like "email about 201 3rd St" work (only "201", "3rd", "St"
+	// are required).
+	words := strings.Fields(strings.TrimSpace(query))
+	var andClauses bson.A
+	for _, w := range words {
+		if len(w) < 2 || searchStopWords[strings.ToLower(w)] {
+			continue
+		}
+		andClauses = append(andClauses, bson.M{
+			"search_text": bson.M{"$regex": regexEscape(w), "$options": "i"},
+		})
+	}
+	if len(andClauses) == 0 {
+		return nil, 0, nil
+	}
+
+	filter := bson.D{
+		{Key: "_id", Value: bson.D{{Key: "$not", Value: bson.D{{Key: "$regex", Value: "^__"}}}}},
+		{Key: "$and", Value: andClauses},
+	}
+	if strings.TrimSpace(sheetID) != "" {
+		filter = append(filter, bson.E{Key: "sheet_id", Value: sheetID})
+	}
+	if strings.TrimSpace(componentID) != "" {
+		filter = append(filter, bson.E{Key: "component_id", Value: componentID})
+	}
+
+	total, err := coll.CountDocuments(ctx, filter)
+	if err != nil {
+		return nil, 0, fmt.Errorf("count search rows: %w", err)
+	}
+
+	if offset < 0 {
+		offset = 0
+	}
+	if limit <= 0 {
+		limit = 50
+	}
+
+	opts := options.Find().
+		SetSkip(int64(offset)).
+		SetLimit(int64(limit)).
+		SetSort(bson.D{{Key: "updated_at", Value: -1}})
+
+	cursor, err := coll.Find(ctx, filter, opts)
+	if err != nil {
+		return nil, int(total), fmt.Errorf("search rows text: %w", err)
+	}
+	defer cursor.Close(ctx)
+
+	var rows []ViewRow
+	if err := cursor.All(ctx, &rows); err != nil {
+		return nil, int(total), fmt.Errorf("decode search rows: %w", err)
+	}
+
+	log.Debug().
+		Str("view_id", viewID).
+		Str("query", query).
+		Int("offset", offset).
+		Int("limit", limit).
+		Int("returned", len(rows)).
+		Int("total", int(total)).
+		Msg("view: text search rows")
+	return rows, int(total), nil
+}
+
+// GetRowTaskIndex loads only the _id, task_id, and thread_id fields from all
+// rows in a view. Used by the mailbox to map tasks to rows without loading
+// full cell data.
+func (s *ViewStore) GetRowTaskIndex(ctx context.Context, viewID string) ([]ViewRow, error) {
+	if !s.Available() {
+		return nil, nil
+	}
+	coll := s.mongo.Collection(s.collectionName(viewID))
+	filter := bson.D{{Key: "_id", Value: bson.D{{Key: "$not", Value: bson.D{{Key: "$regex", Value: "^__"}}}}}}
+
+	opts := options.Find().SetProjection(bson.D{
+		{Key: "_id", Value: 1},
+		{Key: "task_id", Value: 1},
+		{Key: "sheet_id", Value: 1},
+		{Key: "component_id", Value: 1},
+		{Key: "row_key", Value: 1},
+		{Key: "stable_ref", Value: 1},
+		{Key: "source", Value: 1},
+	})
+
+	cursor, err := coll.Find(ctx, filter, opts)
+	if err != nil {
+		return nil, fmt.Errorf("find row task index: %w", err)
+	}
+	defer cursor.Close(ctx)
+
+	var rows []ViewRow
+	if err := cursor.All(ctx, &rows); err != nil {
+		return nil, fmt.Errorf("decode row task index: %w", err)
+	}
+	return rows, nil
+}
+
+// GetRowsForMailbox loads all rows with cell data but excludes the large
+// embedding and search_text fields. The mailbox needs MergedCells() for
+// thread_id extraction and row labels.
+func (s *ViewStore) GetRowsForMailbox(ctx context.Context, viewID string) ([]ViewRow, error) {
+	if !s.Available() {
+		return nil, nil
+	}
+	coll := s.mongo.Collection(s.collectionName(viewID))
+
+	// Only fetch rows that are relevant to the mailbox: rows with a task_id
+	// (for task→output association) or a thread_id cell (for direct thread
+	// discovery). This avoids loading the entire collection for large views.
+	filter := bson.D{
+		{Key: "_id", Value: bson.D{{Key: "$not", Value: bson.D{{Key: "$regex", Value: "^__"}}}}},
+		{Key: "$or", Value: bson.A{
+			bson.D{{Key: "task_id", Value: bson.D{{Key: "$exists", Value: true}, {Key: "$ne", Value: ""}}}},
+			bson.D{{Key: "cells.thread_id", Value: bson.D{{Key: "$exists", Value: true}, {Key: "$ne", Value: ""}}}},
+			bson.D{{Key: "agent_cells.thread_id", Value: bson.D{{Key: "$exists", Value: true}, {Key: "$ne", Value: ""}}}},
+		}},
+	}
+
+	opts := options.Find().SetProjection(bson.D{
+		{Key: "embedding", Value: 0},
+		{Key: "search_text", Value: 0},
+	})
+
+	cursor, err := coll.Find(ctx, filter, opts)
+	if err != nil {
+		return nil, fmt.Errorf("find mailbox rows: %w", err)
+	}
+	defer cursor.Close(ctx)
+
+	var rows []ViewRow
+	if err := cursor.All(ctx, &rows); err != nil {
+		return nil, fmt.Errorf("decode mailbox rows: %w", err)
+	}
+	return rows, nil
+}
+
 // GetRowByID loads a row by _id only (no sheet filter). Used for detail layout cache lookups.
 func (s *ViewStore) GetRowByID(ctx context.Context, viewID, rowID string) (*ViewRow, error) {
 	if !s.Available() {
@@ -213,6 +411,93 @@ func (s *ViewStore) UpsertRows(ctx context.Context, viewID string, rows []ViewRo
 
 	s.autoEmbed(ctx, rows)
 
+	return s.upsertRowsBulk(ctx, viewID, rows)
+}
+
+// UpsertRowsNoEmbed inserts/updates rows without running embeddings.
+// Use when embeddings will be generated asynchronously (e.g. during large imports).
+func (s *ViewStore) UpsertRowsNoEmbed(ctx context.Context, viewID string, rows []ViewRow) error {
+	if !s.Available() || len(rows) == 0 {
+		return nil
+	}
+
+	// Still build search_text for text-based search even without embeddings.
+	for i := range rows {
+		rows[i].SearchText = buildSearchText(rows[i])
+	}
+
+	return s.upsertRowsBulk(ctx, viewID, rows)
+}
+
+// EmbedRowsAsync kicks off embedding generation in the background for the given view.
+func (s *ViewStore) EmbedRowsAsync(viewID string) {
+	if s == nil || !s.Available() || s.embedder == nil || !s.embedder.Available() {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		defer cancel()
+
+		rows, err := s.GetRows(ctx, viewID, "", "")
+		if err != nil {
+			log.Warn().Err(err).Str("view_id", viewID).Msg("async embed: failed to load rows")
+			return
+		}
+
+		needEmbed := make([]ViewRow, 0)
+		for _, r := range rows {
+			if len(r.Embedding) == 0 && r.SearchText != "" {
+				needEmbed = append(needEmbed, r)
+			}
+		}
+		if len(needEmbed) == 0 {
+			return
+		}
+
+		log.Info().Str("view_id", viewID).Int("rows", len(needEmbed)).Msg("async embed: starting background embedding")
+
+		const batchSize = 2000
+		embedded := 0
+		for i := 0; i < len(needEmbed); i += batchSize {
+			if ctx.Err() != nil {
+				break
+			}
+			end := i + batchSize
+			if end > len(needEmbed) {
+				end = len(needEmbed)
+			}
+			batch := needEmbed[i:end]
+			s.autoEmbed(ctx, batch)
+
+			updates := make([]EmbeddingUpdate, 0, len(batch))
+			for _, r := range batch {
+				if len(r.Embedding) > 0 {
+					updates = append(updates, EmbeddingUpdate{
+						RowID:      r.ID,
+						SearchText: r.SearchText,
+						Embedding:  r.Embedding,
+					})
+				}
+			}
+			if len(updates) == 0 {
+				continue
+			}
+			if err := s.BulkUpdateEmbeddings(ctx, viewID, updates); err != nil {
+				log.Warn().Err(err).Str("view_id", viewID).Int("batch", i/batchSize).Msg("async embed: failed to persist batch")
+				continue
+			}
+			embedded += len(updates)
+			log.Info().Str("view_id", viewID).Int("embedded", embedded).Int("total", len(needEmbed)).Msg("async embed: progress")
+		}
+		log.Info().Str("view_id", viewID).Int("embedded", embedded).Msg("async embed: complete")
+	}()
+}
+
+func buildSearchText(row ViewRow) string {
+	return RowSearchText(&row)
+}
+
+func (s *ViewStore) upsertRowsBulk(ctx context.Context, viewID string, rows []ViewRow) error {
 	coll := s.mongo.Collection(s.collectionName(viewID))
 
 	models := make([]mongo.WriteModel, 0, len(rows))
@@ -626,6 +911,40 @@ func (s *ViewStore) UpdateRowEmbedding(ctx context.Context, viewID, rowID string
 	return nil
 }
 
+// EmbeddingUpdate holds the fields needed to persist an embedding without
+// touching any other row data (avoids overwriting concurrent cell updates).
+type EmbeddingUpdate struct {
+	RowID      string
+	SearchText string
+	Embedding  []float64
+}
+
+// BulkUpdateEmbeddings writes search_text and embedding for many rows in a
+// single bulk operation. Only those two fields are $set — cells, pinned, manual
+// etc. are untouched, eliminating the read-modify-write race in EmbedRowsAsync.
+func (s *ViewStore) BulkUpdateEmbeddings(ctx context.Context, viewID string, updates []EmbeddingUpdate) error {
+	if !s.Available() || len(updates) == 0 {
+		return nil
+	}
+	coll := s.mongo.Collection(s.collectionName(viewID))
+
+	models := make([]mongo.WriteModel, 0, len(updates))
+	for _, u := range updates {
+		models = append(models, mongo.NewUpdateOneModel().
+			SetFilter(bson.D{{Key: "_id", Value: u.RowID}}).
+			SetUpdate(bson.D{{Key: "$set", Value: bson.D{
+				{Key: "search_text", Value: u.SearchText},
+				{Key: "embedding", Value: u.Embedding},
+			}}}))
+	}
+
+	_, err := coll.BulkWrite(ctx, models)
+	if err != nil {
+		return fmt.Errorf("bulk update embeddings: %w", err)
+	}
+	return nil
+}
+
 // FindByStableRef looks up a row by its stable_ref within a sheet scope.
 // Returns nil if not found.
 func (s *ViewStore) FindByStableRef(ctx context.Context, viewID, sheetID, ref string) (*ViewRow, error) {
@@ -745,11 +1064,13 @@ func (s *ViewStore) UpdateRow(ctx context.Context, viewID, rowID string, cells m
 	return nil
 }
 
-// deriveRowKey builds a deterministic, schema-agnostic key from the row's
-// non-empty cells. Semantics live in BAML/vector resolution, not in Go field
-// heuristics, so this is intentionally just a canonical content hash.
-// System/hidden fields (prefixed with _ or named thread_id) are excluded so
-// that adding metadata doesn't change a row's identity key.
+// maxRowKeyCells caps how many cells contribute to the row key hash.
+// Using only the first N alphabetically sorted cells makes the key stable when
+// new columns are added later (e.g., enrichment adds zip+rent to an existing
+// address row). The real dedup intelligence lives in ClassifyRowMatch/vector
+// search; this is the last-resort deterministic fallback.
+const maxRowKeyCells = 4
+
 func deriveRowKey(cells map[string]string) string {
 	if len(cells) == 0 {
 		return ""
@@ -770,6 +1091,9 @@ func deriveRowKey(cells map[string]string) string {
 	}
 
 	sort.Strings(keys)
+	if len(keys) > maxRowKeyCells {
+		keys = keys[:maxRowKeyCells]
+	}
 
 	parts := make([]string, 0, len(keys))
 	for _, key := range keys {
@@ -861,6 +1185,25 @@ func (s *ViewStore) UpdateCells(ctx context.Context, viewID, sheetID, rowID stri
 		Int64("matched", res.MatchedCount).
 		Int64("modified", res.ModifiedCount).
 		Msg("view: manual cell edit")
+
+	// Rebuild search_text so the updated values are searchable.
+	go func() {
+		bgCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		row, err := s.GetRow(bgCtx, viewID, sheetID, rowID)
+		if err != nil || row == nil {
+			return
+		}
+		newSearchText := buildSearchText(*row)
+		if newSearchText == row.SearchText {
+			return
+		}
+		_, _ = coll.UpdateOne(bgCtx,
+			bson.D{{Key: "_id", Value: rowID}},
+			bson.D{{Key: "$set", Value: bson.D{{Key: "search_text", Value: newSearchText}}}},
+		)
+	}()
+
 	return nil
 }
 
@@ -1106,6 +1449,65 @@ type SearchCriterion struct {
 	Value  string
 }
 
+// SearchRowsAnd finds rows where ALL criteria match (AND logic). Each
+// criterion checks cells.column OR pinned.column. This is used for identity-
+// based dedup where we need precise matches (e.g. same address AND city).
+func (s *ViewStore) SearchRowsAnd(ctx context.Context, viewID, sheetID, componentID string, criteria []SearchCriterion, maxResults int) ([]ViewRow, error) {
+	if !s.Available() || len(criteria) == 0 {
+		return nil, nil
+	}
+	coll := s.mongo.Collection(s.collectionName(viewID))
+
+	andClauses := make(bson.A, 0, len(criteria))
+	for _, c := range criteria {
+		if c.Column == "" || c.Value == "" {
+			continue
+		}
+		if strings.Contains(c.Column, ".") || strings.Contains(c.Column, "$") {
+			continue
+		}
+		escaped := regexEscape(c.Value)
+		pattern := bson.M{"$regex": escaped, "$options": "i"}
+		andClauses = append(andClauses, bson.M{"$or": bson.A{
+			bson.M{"cells." + c.Column: pattern},
+			bson.M{"pinned." + c.Column: pattern},
+		}})
+	}
+	if len(andClauses) == 0 {
+		return nil, nil
+	}
+
+	filter := bson.M{"$and": andClauses}
+	if sheetID != "" {
+		filter["sheet_id"] = sheetID
+	}
+	if componentID != "" {
+		filter["component_id"] = componentID
+	}
+
+	if maxResults <= 0 {
+		maxResults = 50
+	}
+	opts := options.Find().SetLimit(int64(maxResults))
+	cursor, err := coll.Find(ctx, filter, opts)
+	if err != nil {
+		return nil, fmt.Errorf("search rows and: %w", err)
+	}
+	defer cursor.Close(ctx)
+
+	var rows []ViewRow
+	if err := cursor.All(ctx, &rows); err != nil {
+		return nil, fmt.Errorf("decode search rows and: %w", err)
+	}
+
+	log.Debug().
+		Str("view_id", viewID).
+		Int("criteria", len(criteria)).
+		Int("results", len(rows)).
+		Msg("view: search rows (AND)")
+	return rows, nil
+}
+
 // SearchRows finds rows where any cell (cells or pinned) matches one of the
 // search criteria using case-insensitive regex. Returns at most maxResults rows.
 // This enables targeted lookups instead of loading the entire collection.
@@ -1165,7 +1567,21 @@ func (s *ViewStore) SearchRows(ctx context.Context, viewID, sheetID, componentID
 	return rows, nil
 }
 
-// regexEscape escapes special regex characters in a string.
+var searchStopWords = map[string]bool{
+	"a": true, "an": true, "the": true, "is": true, "at": true,
+	"in": true, "on": true, "of": true, "to": true, "for": true,
+	"by": true, "or": true, "and": true, "but": true, "not": true,
+	"with": true, "from": true, "about": true, "into": true,
+	"this": true, "that": true, "it": true, "its": true,
+	"was": true, "were": true, "are": true, "been": true,
+	"has": true, "had": true, "have": true, "will": true,
+	"can": true, "may": true, "do": true, "does": true, "did": true,
+	"email": true, "sent": true, "inquiry": true, "regarding": true,
+	"property": true, "space": true, "commercial": true, "retail": true,
+	"lease": true, "rental": true, "available": true, "listing": true,
+	"outreach": true, "update": true, "status": true,
+}
+
 func regexEscape(s string) string {
 	special := `\.+*?^$()[]{}|`
 	var b strings.Builder

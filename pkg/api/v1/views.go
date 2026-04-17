@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -305,6 +306,9 @@ func (vg *ViewsGroup) ResolveData(c echo.Context) error {
 		ForceRefresh:  queryBool(c.QueryParam(viewRefreshQueryParam)),
 		ViewAgentRefs: v.Definition.Agents,
 		SourceViewID:  v.ID,
+		Offset:        queryInt(c.QueryParam("offset"), 0),
+		Limit:         queryInt(c.QueryParam("limit"), 0),
+		Search:        c.QueryParam("search"),
 	})
 	if err != nil {
 		log.Error().Err(err).Str("view_id", v.ID).Str("sheet_id", sheetID).Str("component", componentID).Msg("data resolve failed")
@@ -376,6 +380,17 @@ func queryBool(value string) bool {
 	default:
 		return false
 	}
+}
+
+func queryInt(value string, defaultVal int) int {
+	if value == "" {
+		return defaultVal
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(value))
+	if err != nil {
+		return defaultVal
+	}
+	return n
 }
 
 type deletedSheetColumn struct {
@@ -1251,7 +1266,7 @@ type mailboxThread struct {
 	OutputIDs []string              `json:"output_ids,omitempty"`
 }
 
-const mailboxOutputLimit = 200
+const mailboxOutputLimit = 500
 
 // stripCrossThreadDrafts removes threads that consist entirely of DRAFT
 // messages when another thread contains a SENT message with the same
@@ -1330,11 +1345,13 @@ func (vg *ViewsGroup) Mailbox(c echo.Context) error {
 	}
 
 	// Load view rows to collect task IDs and row-level thread_ids.
+	// We need full cell data here because the mailbox reads thread_id from
+	// cells and uses MergedCells for row labels in the response.
 	taskRowMap := make(map[string]*views.ViewRow)
 	var viewTaskIDs []string
 	var cachedRows []views.ViewRow
 	if vg.store != nil && vg.store.Available() {
-		allRows, rowErr := vg.store.GetRows(ctx, viewID, "", "")
+		allRows, rowErr := vg.store.GetRowsForMailbox(ctx, viewID)
 		if rowErr == nil {
 			cachedRows = allRows
 			seen := make(map[string]bool)
@@ -1368,9 +1385,10 @@ func (vg *ViewsGroup) Mailbox(c echo.Context) error {
 		}
 	}
 
-	// Query email outputs using two strategies:
+	// Query email outputs using three strategies to ensure completeness:
 	//  1. Tasks whose payload has source_view_id matching this view
 	//  2. Tasks referenced by this view's rows or their subtasks
+	//  3. Tasks from agents explicitly assigned to this view
 	emailType := types.TaskOutputTypeEmail
 	outputsByID := make(map[string]*types.TaskOutput)
 
@@ -1394,6 +1412,23 @@ func (vg *ViewsGroup) Mailbox(c echo.Context) error {
 		})
 		if taskErr == nil {
 			for _, o := range byTasks {
+				outputsByID[o.ID] = o
+			}
+		}
+	}
+
+	// Strategy 3: query by each agent assigned to this view. Catches emails
+	// from tasks dispatched outside the copilot (scheduled tasks, API calls)
+	// that didn't set source_view_id but used one of the view's agents.
+	for _, agentRef := range view.Definition.Agents {
+		agentID := agentRef
+		byAgent, agentErr := vg.backend.ListWorkspaceTaskOutputs(ctx, workspaceID, types.TaskOutputListFilter{
+			OutputType: &emailType,
+			AgentID:    &agentID,
+			Limit:      mailboxOutputLimit,
+		})
+		if agentErr == nil {
+			for _, o := range byAgent {
 				outputsByID[o.ID] = o
 			}
 		}
@@ -1830,47 +1865,7 @@ func (vg *ViewsGroup) ImportData(c echo.Context) error {
 		return ErrorResponse(c, http.StatusBadRequest, err.Error())
 	}
 
-	if vg.viewSync != nil && result.RowCount > 0 {
-		go vg.propagateImportRows(viewID, workspaceID, sheetID, comp.ID)
-	}
-
 	return SuccessResponse(c, result)
-}
-
-// propagateImportRows syncs imported rows to other sheets in the view.
-// Runs in a background goroutine so the import response returns immediately.
-func (vg *ViewsGroup) propagateImportRows(viewID string, workspaceID uint, sourceSheetID, sourceComponentID string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
-
-	rows, err := vg.store.GetRowsBySource(ctx, viewID, sourceSheetID, sourceComponentID, views.RowSourceImport)
-	if err != nil || len(rows) == 0 {
-		return
-	}
-
-	log.Info().Str("view_id", viewID).Int("rows", len(rows)).Msg("import: propagating to other sheets")
-
-	synced := 0
-	for _, row := range rows {
-		if ctx.Err() != nil {
-			break
-		}
-		cells := row.MergedCells()
-		if len(cells) == 0 {
-			continue
-		}
-		vg.viewSync.SyncToolWrite(ctx, views.ToolWriteInput{
-			ViewID:            viewID,
-			WorkspaceID:       workspaceID,
-			SourceSheetID:     sourceSheetID,
-			SourceComponentID: sourceComponentID,
-			Cells:             cells,
-			RowID:             row.ID,
-			ForceInsert:       true,
-		})
-		synced++
-	}
-	log.Info().Str("view_id", viewID).Int("synced", synced).Msg("import: propagation complete")
 }
 
 // ---------------------------------------------------------------------------
