@@ -229,6 +229,13 @@ func (f *EmailThreadFetcher) getConnectionCredentials(ctx context.Context, works
 			Msg("no email connection for workspace")
 		return nil
 	}
+	if conn == nil {
+		log.Debug().
+			Uint("workspace_id", workspaceID).
+			Str("integration", integration).
+			Msg("email connection not configured for workspace")
+		return nil
+	}
 	creds, err := repository.DecryptCredentials(conn)
 	if err != nil || creds.AccessToken == "" {
 		return nil
