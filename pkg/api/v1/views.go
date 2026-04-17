@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -1187,10 +1188,9 @@ func syntheticEmailThreads(outputs []*types.TaskOutput, existing map[string][]vi
 		if o.Status == types.TaskOutputStatusPending || o.Status == types.TaskOutputStatusApproved {
 			continue
 		}
-		if ref := emailOutputThreadRef(o); ref.ID != "" {
-			if len(existing[ref.Key()]) > 0 {
-				continue
-			}
+		ref := emailOutputThreadRef(o)
+		if ref.ID != "" && len(existing[ref.Key()]) > 0 {
+			continue
 		}
 
 		recipient := dataString(o.Data, "recipient", "recipient_email", "to")
@@ -1201,14 +1201,19 @@ func syntheticEmailThreads(outputs []*types.TaskOutput, existing map[string][]vi
 		}
 
 		threadKey := "output:" + o.ID
+		threadID := threadKey
+		if ref.ID != "" {
+			threadKey = ref.Key()
+			threadID = ref.ID
+		}
 		deeplink := dataString(o.Data, "email_link", "uri")
 		if deeplink == "" {
 			deeplink = metadataString(o.Metadata, "deeplink")
 		}
 
-		synth[threadKey] = []views.ThreadMessage{{
+		synth[threadKey] = append(synth[threadKey], views.ThreadMessage{
 			ID:         o.ID,
-			ThreadID:   threadKey,
+			ThreadID:   threadID,
 			From:       "me",
 			To:         recipient,
 			Subject:    subject,
@@ -1217,10 +1222,36 @@ func syntheticEmailThreads(outputs []*types.TaskOutput, existing map[string][]vi
 			Date:       o.CreatedAt.UTC().Format(time.RFC3339),
 			Timestamp:  o.CreatedAt.UnixMilli(),
 			IsOutbound: true,
+			Labels:     syntheticEmailLabels(o),
 			Deeplink:   deeplink,
-		}}
+		})
+	}
+	for threadKey := range synth {
+		sort.Slice(synth[threadKey], func(i, j int) bool {
+			return synth[threadKey][i].Timestamp < synth[threadKey][j].Timestamp
+		})
 	}
 	return synth
+}
+
+func syntheticEmailLabels(o *types.TaskOutput) []string {
+	if o == nil {
+		return nil
+	}
+	status := strings.ToLower(strings.TrimSpace(dataString(o.Data, "status")))
+	switch status {
+	case "draft":
+		return []string{"DRAFT"}
+	case "sent":
+		return []string{"SENT"}
+	}
+	if o.HasApprovalSurface() || o.IsDraftEmail() {
+		return []string{"DRAFT"}
+	}
+	if strings.TrimSpace(dataString(o.Data, "message_id", "messageId")) != "" {
+		return []string{"SENT"}
+	}
+	return nil
 }
 
 // ---------------------------------------------------------------------------

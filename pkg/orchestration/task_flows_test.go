@@ -16,6 +16,27 @@ type acceptAgentCommandBackend struct {
 	createdEvent *types.OrchestrationOutboxEvent
 }
 
+type deferredToolExecutorStub struct {
+	requested types.DeferredToolExecutionRequest
+	stdout    string
+	stderr    string
+	exitCode  int
+	err       error
+}
+
+func (s *deferredToolExecutorStub) ExecuteDeferred(_ context.Context, req types.DeferredToolExecutionRequest) (string, string, int, error) {
+	s.requested = req
+	return s.stdout, s.stderr, s.exitCode, s.err
+}
+
+func (s *deferredToolExecutorStub) RecordToolRejection(context.Context, string, string, string) error {
+	return nil
+}
+
+func (s *deferredToolExecutorStub) GrantWritePreapproval(context.Context, string) error {
+	return nil
+}
+
 func (b *acceptAgentCommandBackend) GetAgentProfile(_ context.Context, _ uint, _ string) (*types.AgentProfile, error) {
 	return b.profile, nil
 }
@@ -273,5 +294,58 @@ func TestDeliverTaskInputRequeuesWhenSessionLeaseIsGone(t *testing.T) {
 	}
 	if spec.Message != "please try again tomorrow" {
 		t.Fatalf("resume message = %q, want %q", spec.Message, "please try again tomorrow")
+	}
+}
+
+func TestMaybeExecuteDeferredToolCallPassesTaskContextToExecutor(t *testing.T) {
+	executor := &deferredToolExecutorStub{
+		stdout:   `{"thread_id":"thread-123","message_id":"msg-123"}`,
+		exitCode: 0,
+	}
+	flows := NewTaskFlows(nil, nil, nil, nil, nil, nil)
+	flows.SetToolExecutor(executor)
+
+	runID := "run-1"
+	agentID := "agent-1"
+	blockerID := "blocker-1"
+	task := &types.AgentTask{
+		ID:               "task-1",
+		WorkspaceID:      7,
+		AgentID:          &agentID,
+		TargetRunID:      &runID,
+		CurrentBlockerID: &blockerID,
+		CurrentBlocker: &types.TaskBlocker{
+			PayloadJSON: map[string]any{
+				"tool_call": map[string]any{
+					"tool":         "gmail",
+					"args":         []string{"send-email", "luke@example.com", "Hello", "Body"},
+					"workspace_id": 7,
+					"member_id":    42,
+					"summary":      "send the email",
+				},
+			},
+		},
+	}
+	approve := types.TaskInputActionApprove
+
+	result := flows.maybeExecuteDeferredToolCall(context.Background(), task, &approve, "")
+
+	if executor.requested.Task == nil {
+		t.Fatal("expected task context to be forwarded to deferred executor")
+	}
+	if got := executor.requested.Task.ID; got != "task-1" {
+		t.Fatalf("forwarded task id = %q, want task-1", got)
+	}
+	if got := executor.requested.MemberID; got != 42 {
+		t.Fatalf("forwarded member id = %d, want 42", got)
+	}
+	if got := executor.requested.ToolName; got != "gmail" {
+		t.Fatalf("forwarded tool name = %q, want gmail", got)
+	}
+	if got := executor.requested.Args[0]; got != "send-email" {
+		t.Fatalf("forwarded command = %q, want send-email", got)
+	}
+	if result == "" {
+		t.Fatal("expected approval result message")
 	}
 }
