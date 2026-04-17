@@ -352,9 +352,12 @@ func TestSyntheticEmailThreadsFallsBackWhenNoRealThreadExists(t *testing.T) {
 
 type mailboxTestBackend struct {
 	repository.BackendRepository
-	workspace *types.Workspace
-	view      *types.View
-	outputs   []*types.TaskOutput
+	workspace   *types.Workspace
+	view        *types.View
+	outputs     []*types.TaskOutput
+	tasks       map[string]*types.AgentTask
+	subtasks    map[string][]*types.AgentTask
+	connections map[string]*types.IntegrationConnection
 }
 
 func (b *mailboxTestBackend) GetWorkspaceByExternalId(context.Context, string) (*types.Workspace, error) {
@@ -365,8 +368,42 @@ func (b *mailboxTestBackend) GetView(context.Context, uint, string) (*types.View
 	return b.view, nil
 }
 
-func (b *mailboxTestBackend) GetConnection(context.Context, uint, uint, string) (*types.IntegrationConnection, error) {
-	return nil, errors.New("connection not configured")
+func (b *mailboxTestBackend) GetConnection(_ context.Context, _ uint, _ uint, integration string) (*types.IntegrationConnection, error) {
+	if b.connections != nil {
+		if conn, ok := b.connections[integration]; ok {
+			return conn, nil
+		}
+	}
+	return nil, nil
+}
+
+func (b *mailboxTestBackend) GetTask(_ context.Context, _ uint, taskID string) (*types.AgentTask, error) {
+	if b.tasks == nil {
+		return nil, errors.New("task not configured")
+	}
+	task, ok := b.tasks[taskID]
+	if !ok {
+		return nil, errors.New("task not configured")
+	}
+	return task, nil
+}
+
+func (b *mailboxTestBackend) GetTaskByID(_ context.Context, taskID string) (*types.AgentTask, error) {
+	if b.tasks == nil {
+		return nil, nil
+	}
+	return b.tasks[taskID], nil
+}
+
+func (b *mailboxTestBackend) ListTaskOutputs(_ context.Context, _ uint, taskID string) ([]*types.TaskOutput, error) {
+	var result []*types.TaskOutput
+	for _, output := range b.outputs {
+		if output == nil || output.TaskID != taskID {
+			continue
+		}
+		result = append(result, output)
+	}
+	return result, nil
 }
 
 func (b *mailboxTestBackend) ListWorkspaceTaskOutputs(_ context.Context, _ uint, filter types.TaskOutputListFilter) ([]*types.TaskOutput, error) {
@@ -395,6 +432,17 @@ func (b *mailboxTestBackend) ListWorkspaceTaskOutputs(_ context.Context, _ uint,
 }
 
 func (b *mailboxTestBackend) ListChildTaskIDsByParents(context.Context, []string) (map[string]string, error) {
+	return nil, nil
+}
+
+func (b *mailboxTestBackend) ListSubtasks(_ context.Context, parentTaskID string) ([]*types.AgentTask, error) {
+	if b.subtasks == nil {
+		return nil, nil
+	}
+	return b.subtasks[parentTaskID], nil
+}
+
+func (b *mailboxTestBackend) ListSpawnBindingsForOutputs(context.Context, []string) ([]repository.SpawnBinding, error) {
 	return nil, nil
 }
 
@@ -427,6 +475,40 @@ func mailboxResponseData(t *testing.T, vg *ViewsGroup, backend *mailboxTestBacke
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode mailbox response: %v", err)
+	}
+	if !resp.Success {
+		t.Fatalf("expected success response, got %s", rec.Body.String())
+	}
+	return resp.Data
+}
+
+func rowDetailResponseData(t *testing.T, vg *ViewsGroup) struct {
+	EmailThreads map[string][]views.ThreadMessage `json:"email_threads"`
+} {
+	t.Helper()
+
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodGet, "/workspaces/ws-1/views/view-1/rows/row-1?task_id=task-1", nil)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetParamNames("workspace_id", "view_id", "row_id")
+	c.SetParamValues("ws-1", "view-1", "row-1")
+
+	if err := vg.RowDetail(c); err != nil {
+		t.Fatalf("RowDetail returned error: %v", err)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status code = %d, want 200", rec.Code)
+	}
+
+	var resp struct {
+		Success bool `json:"success"`
+		Data    struct {
+			EmailThreads map[string][]views.ThreadMessage `json:"email_threads"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode row detail response: %v", err)
 	}
 	if !resp.Success {
 		t.Fatalf("expected success response, got %s", rec.Body.String())
@@ -602,6 +684,47 @@ func TestMailboxTreatsApprovalDraftAsSecondaryWhenSentOutputExists(t *testing.T)
 	}
 	if _, ok := data.Threads["gmail:thread-123"]; !ok {
 		t.Fatalf("expected gmail provider thread key, got %#v", data.Threads)
+	}
+}
+
+func TestRowDetailReturnsSyntheticThreadsWhenConnectionLookupReturnsNil(t *testing.T) {
+	backend := &mailboxTestBackend{
+		workspace: &types.Workspace{Id: 7},
+		view:      &types.View{Definition: types.ViewDefinition{}},
+		tasks: map[string]*types.AgentTask{
+			"task-1": {
+				ID:          "task-1",
+				WorkspaceID: 7,
+				State:       types.AgentTaskStateDone,
+			},
+		},
+		outputs: []*types.TaskOutput{{
+			ID:         "out-1",
+			TaskID:     "task-1",
+			OutputType: types.TaskOutputTypeEmail,
+			Status:     types.TaskOutputStatusActive,
+			Data: map[string]any{
+				"thread_id": "thread-123",
+				"to":        "luke@example.com",
+				"subject":   "Beam sandboxes",
+				"status":    "sent",
+			},
+			Metadata: map[string]any{
+				"integration": "gmail",
+				"_tool":       "gmail",
+			},
+		}},
+	}
+	vg := &ViewsGroup{backend: backend}
+
+	data := rowDetailResponseData(t, vg)
+
+	thread, ok := data.EmailThreads["gmail:thread-123"]
+	if !ok {
+		t.Fatalf("expected gmail provider thread key, got %#v", data.EmailThreads)
+	}
+	if got := thread[0].ThreadID; got != "thread-123" {
+		t.Fatalf("thread id = %q, want thread-123", got)
 	}
 }
 
