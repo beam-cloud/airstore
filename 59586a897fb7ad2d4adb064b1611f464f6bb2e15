@@ -1,0 +1,103 @@
+pkg/sources/queries/baml_client/stream_types/classes.go
+  9b3f594d54cf4ce7 23-82
+pkg/sources/queries/baml_client/functions_stream.go
+  9b3f594d54cf4ce7 119-192
+pkg/gateway/services/view_filters.go
+  9b3f594d54cf4ce7 86-91,126-127,398-416
+pkg/clients/agentmail.go
+  ab7c655d83d0a5db 109,120-132,165,169,178,182,200,204
+pkg/sources/queries/baml_src/smart_queries.baml
+  9b3f594d54cf4ce7 1063-1112,1240-1275
+pkg/sources/provider.go
+  9b3f594d54cf4ce7 124-125
+pkg/sources/providers/agentmail.go
+  9b3f594d54cf4ce7 75-76,170-328
+pkg/gateway/services/sources_queries.go
+  9b3f594d54cf4ce7 339,1160-1161,1337-1338,1392-1393,1440-1442,1505
+pkg/sources/queries/baml_client/type_map.go
+  9b3f594d54cf4ce7 24-25
+pkg/sources/queries/baml_client/types/classes.go
+  9b3f594d54cf4ce7 23-82
+pkg/sources/queries/baml_client/functions.go
+  9b3f594d54cf4ce7 98-171
+pkg/sources/queries/baml_client/functions_parse.go
+  9b3f594d54cf4ce7 75-121
+pkg/sources/queries/baml_client/baml_source_map.go
+  9b3f594d54cf4ce7 20-21
+pkg/sources/queries/baml_client/functions_parse_stream.go
+  9b3f594d54cf4ce7 75-121
+pkg/sources/queries/baml_client/type_builder/classes.go
+  9b3f594d54cf4ce7 18-61
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.0",
+  "base_commit_sha": "59586a897fb7ad2d4adb064b1611f464f6bb2e15",
+  "prompts": {
+    "6e4e3e362401fa91": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019d6e37-21a7-7450-ab67-ace779e44315",
+        "model": "gpt-5.4"
+      },
+      "human_author": "Cooper",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 2,
+      "overriden_lines": 0
+    },
+    "97b92347d321a7ae": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "74560708-cdd0-4987-a73f-4d7dd7dab923",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "Cooper",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 3,
+      "overriden_lines": 0
+    },
+    "9b3f594d54cf4ce7": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "b3309994-a4a0-4253-a30c-1901126cae97",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "Cooper",
+      "messages": [],
+      "total_additions": 699,
+      "total_deletions": 5,
+      "accepted_lines": 698,
+      "overriden_lines": 1
+    },
+    "ab7c655d83d0a5db": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ad05abbd-a011-432b-b0b4-2b35be0c8c38",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "Cooper",
+      "messages": [],
+      "total_additions": 20,
+      "total_deletions": 9,
+      "accepted_lines": 20,
+      "overriden_lines": 0
+    },
+    "c98959dd3de0b8bf": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "8ed32444-64af-4312-b790-7e0adfe153ea",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "Cooper",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 2,
+      "overriden_lines": 0
+    }
+  }
+}
