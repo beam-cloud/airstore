@@ -824,17 +824,10 @@ func (vg *ViewsGroup) RowDetail(c echo.Context) error {
 	// If no task is associated, still check for thread_id in row cells.
 	if parentTaskID == "" {
 		if rowCells != nil {
-			if tid := strings.TrimSpace(rowCells["thread_id"]); tid != "" {
-				var threadIDs []string
-				for _, t := range strings.Split(tid, ",") {
-					if t = strings.TrimSpace(t); t != "" {
-						threadIDs = append(threadIDs, t)
-					}
-				}
-				if len(threadIDs) > 0 {
-					fetcher := views.NewEmailThreadFetcher(vg.backend)
-					resp["email_threads"] = fetcher.FetchThreads(ctx, workspaceID, threadIDs)
-				}
+			threadRefs := threadRefsFromCellValue(rowCells["thread_id"], "")
+			if len(threadRefs) > 0 {
+				fetcher := views.NewEmailThreadFetcher(vg.backend)
+				resp["email_threads"] = fetcher.FetchThreads(ctx, workspaceID, threadRefs)
 			}
 		}
 		return SuccessResponse(c, resp)
@@ -863,25 +856,19 @@ func (vg *ViewsGroup) RowDetail(c echo.Context) error {
 	projection := views.ProjectDetail(detailContext.Task, detailContext.Outputs, detailContext.Subtasks)
 
 	// Primary: thread_id written by the agent onto the row cell
-	var cellThreadIDs []string
+	var cellThreadRefs []views.EmailThreadRef
 	if rowCells != nil {
-		if tid := strings.TrimSpace(rowCells["thread_id"]); tid != "" {
-			for _, t := range strings.Split(tid, ",") {
-				if t = strings.TrimSpace(t); t != "" {
-					cellThreadIDs = append(cellThreadIDs, t)
-				}
-			}
-		}
+		cellThreadRefs = threadRefsFromCellValue(rowCells["thread_id"], "")
 	}
 
 	var emailThreads map[string][]views.ThreadMessage
-	threadIDs := cellThreadIDs
-	if len(threadIDs) == 0 {
-		threadIDs = extractThreadIDs(projection.ThreadOutputs)
+	threadRefs := cellThreadRefs
+	if len(threadRefs) == 0 {
+		threadRefs = extractThreadRefs(projection.ThreadOutputs)
 	}
-	if len(threadIDs) > 0 {
+	if len(threadRefs) > 0 {
 		fetcher := views.NewEmailThreadFetcher(vg.backend)
-		emailThreads = fetcher.FetchThreads(ctx, workspaceID, threadIDs)
+		emailThreads = fetcher.FetchThreads(ctx, workspaceID, threadRefs)
 	}
 	if synth := syntheticEmailThreads(projection.ThreadOutputs, emailThreads); len(synth) > 0 {
 		if emailThreads == nil {
@@ -973,40 +960,187 @@ func (vg *ViewsGroup) detailTemplateForRow(ctx context.Context, workspaceID uint
 	return views.InferDetailTemplate(nil)
 }
 
-func extractThreadIDs(outputs []*types.TaskOutput) []string {
+func extractThreadRefs(outputs []*types.TaskOutput) []views.EmailThreadRef {
 	seen := make(map[string]bool)
-	var ids []string
+	refs := make([]views.EmailThreadRef, 0, len(outputs))
 	for _, o := range outputs {
-		tid := emailOutputThreadID(o)
-		if tid == "" || seen[tid] {
+		ref := emailOutputThreadRef(o)
+		if ref.ID == "" {
 			continue
 		}
-		seen[tid] = true
-		ids = append(ids, tid)
+		key := threadRefKey(ref)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		refs = append(refs, ref)
 	}
-	return ids
+	return refs
 }
 
 func isEmailOutput(o *types.TaskOutput) bool {
+	if o == nil {
+		return false
+	}
 	if o.OutputType == types.TaskOutputTypeEmail {
 		return true
 	}
-	return metadataString(o.Metadata, "_tool") == "gmail" &&
-		strings.TrimSpace(dataString(o.Data, "thread_id")) != ""
+	if normalizeEmailIntegration(metadataString(o.Metadata, "integration", "_tool")) != "" {
+		return true
+	}
+	if normalizeEmailIntegration(dataString(o.Data, "integration")) != "" {
+		return true
+	}
+	if strings.TrimSpace(dataString(o.Data, "conversation_id", "conversationId", "thread_id", "threadId")) != "" {
+		return true
+	}
+	if emailIntegrationFromURL(dataString(o.Data, "email_link", "uri")) != "" {
+		return true
+	}
+	return emailIntegrationFromURL(metadataString(o.Metadata, "deeplink")) != ""
 }
 
-func emailOutputThreadID(o *types.TaskOutput) string {
-	if o == nil || !isEmailOutput(o) {
+func emailOutputIntegration(o *types.TaskOutput) string {
+	if o == nil {
 		return ""
 	}
-	tid := strings.TrimSpace(dataString(o.Data, "thread_id"))
-	if tid == "" {
-		tid = gmailThreadIDFromURL(dataString(o.Data, "email_link", "uri"))
+	if integration := normalizeEmailIntegration(metadataString(o.Metadata, "integration")); integration != "" {
+		return integration
 	}
-	if tid == "" {
-		tid = gmailThreadIDFromURL(metadataString(o.Metadata, "deeplink"))
+	if integration := normalizeEmailIntegration(dataString(o.Data, "integration")); integration != "" {
+		return integration
 	}
-	return strings.TrimSpace(tid)
+	if integration := normalizeEmailIntegration(metadataString(o.Metadata, "_tool")); integration != "" {
+		return integration
+	}
+	if strings.TrimSpace(dataString(o.Data, "conversation_id", "conversationId")) != "" {
+		return string(types.SourceOutlook)
+	}
+	if integration := emailIntegrationFromURL(dataString(o.Data, "email_link", "uri")); integration != "" {
+		return integration
+	}
+	if integration := emailIntegrationFromURL(metadataString(o.Metadata, "deeplink")); integration != "" {
+		return integration
+	}
+	if strings.TrimSpace(dataString(o.Data, "thread_id", "threadId")) != "" {
+		return string(types.SourceGmail)
+	}
+	return ""
+}
+
+func emailOutputThreadRef(o *types.TaskOutput) views.EmailThreadRef {
+	if o == nil || !isEmailOutput(o) {
+		return views.EmailThreadRef{}
+	}
+	ref := views.EmailThreadRef{
+		Integration: emailOutputIntegration(o),
+	}
+	ref.ID = strings.TrimSpace(dataString(o.Data, "thread_id", "threadId", "conversation_id", "conversationId"))
+	if ref.ID == "" {
+		if tid := gmailThreadIDFromURL(dataString(o.Data, "email_link", "uri")); tid != "" {
+			ref.ID = tid
+			if ref.Integration == "" {
+				ref.Integration = string(types.SourceGmail)
+			}
+		}
+	}
+	if ref.ID == "" {
+		if tid := gmailThreadIDFromURL(metadataString(o.Metadata, "deeplink")); tid != "" {
+			ref.ID = tid
+			if ref.Integration == "" {
+				ref.Integration = string(types.SourceGmail)
+			}
+		}
+	}
+	return ref
+}
+
+func threadRefsFromCellValue(raw, integration string) []views.EmailThreadRef {
+	integration = normalizeEmailIntegration(integration)
+	seen := make(map[string]bool)
+	refs := make([]views.EmailThreadRef, 0, 2)
+	for _, tid := range strings.Split(raw, ",") {
+		tid = strings.TrimSpace(tid)
+		if tid == "" {
+			continue
+		}
+		ref := views.EmailThreadRef{ID: tid, Integration: integration}
+		key := threadRefKey(ref)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		refs = append(refs, ref)
+	}
+	return refs
+}
+
+func threadRefKey(ref views.EmailThreadRef) string {
+	return ref.Key()
+}
+
+func normalizeEmailIntegration(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case string(types.SourceGmail):
+		return string(types.SourceGmail)
+	case string(types.SourceOutlook):
+		return string(types.SourceOutlook)
+	default:
+		return ""
+	}
+}
+
+func normalizeMailboxIntegration(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "all":
+		return "all"
+	case string(types.SourceGmail):
+		return string(types.SourceGmail)
+	case string(types.SourceOutlook):
+		return string(types.SourceOutlook)
+	default:
+		return ""
+	}
+}
+
+func filterEmailOutputsByIntegration(outputs []*types.TaskOutput, integration string) []*types.TaskOutput {
+	integration = normalizeMailboxIntegration(integration)
+	if integration == "" || integration == "all" {
+		return outputs
+	}
+	filtered := make([]*types.TaskOutput, 0, len(outputs))
+	for _, output := range outputs {
+		if emailOutputIntegration(output) == integration {
+			filtered = append(filtered, output)
+		}
+	}
+	return filtered
+}
+
+func emailIntegrationFromURL(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		if strings.Contains(raw, "mail.google.com") {
+			return string(types.SourceGmail)
+		}
+		if strings.Contains(raw, "outlook.") || strings.Contains(raw, "office.com") || strings.Contains(raw, "office365.com") {
+			return string(types.SourceOutlook)
+		}
+		return ""
+	}
+	host := strings.ToLower(parsed.Hostname())
+	switch {
+	case host == "mail.google.com":
+		return string(types.SourceGmail)
+	case strings.Contains(host, "outlook.") || strings.Contains(host, "office.com") || strings.Contains(host, "office365.com"):
+		return string(types.SourceOutlook)
+	default:
+		return ""
+	}
 }
 
 func gmailThreadIDFromURL(u string) string {
@@ -1029,12 +1163,16 @@ func dataString(data map[string]any, keys ...string) string {
 	return ""
 }
 
-func metadataString(m map[string]any, key string) string {
+func metadataString(m map[string]any, keys ...string) string {
 	if m == nil {
 		return ""
 	}
-	v, _ := m[key].(string)
-	return v
+	for _, key := range keys {
+		if v, ok := m[key].(string); ok && strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // syntheticEmailThreads builds thread messages from output data for email
@@ -1049,8 +1187,8 @@ func syntheticEmailThreads(outputs []*types.TaskOutput, existing map[string][]vi
 		if o.Status == types.TaskOutputStatusPending || o.Status == types.TaskOutputStatusApproved {
 			continue
 		}
-		if threadID := emailOutputThreadID(o); threadID != "" {
-			if len(existing[threadID]) > 0 {
+		if ref := emailOutputThreadRef(o); ref.ID != "" {
+			if len(existing[ref.Key()]) > 0 {
 				continue
 			}
 		}
@@ -1147,6 +1285,10 @@ func (vg *ViewsGroup) Mailbox(c echo.Context) error {
 	workspaceID, err := vg.workspaceID(c)
 	if err != nil {
 		return ErrorResponse(c, http.StatusBadRequest, err.Error())
+	}
+	selectedIntegration := normalizeMailboxIntegration(c.QueryParam("integration"))
+	if selectedIntegration == "" {
+		return ErrorResponse(c, http.StatusBadRequest, "integration must be one of all, gmail, outlook")
 	}
 	viewID := c.Param("view_id")
 
@@ -1265,6 +1407,7 @@ func (vg *ViewsGroup) Mailbox(c echo.Context) error {
 	for _, o := range outputsByID {
 		outputs = append(outputs, o)
 	}
+	outputs = filterEmailOutputsByIntegration(outputs, selectedIntegration)
 
 	// Build task_id -> []*TaskOutput lookup and collect thread IDs from outputs.
 	taskOutputs := make(map[string][]*types.TaskOutput)
@@ -1272,7 +1415,7 @@ func (vg *ViewsGroup) Mailbox(c echo.Context) error {
 		taskOutputs[o.TaskID] = append(taskOutputs[o.TaskID], o)
 	}
 
-	threadIDs := extractThreadIDs(outputs)
+	threadRefs := extractThreadRefs(outputs)
 
 	// Also collect thread_ids written directly to row cells (agent-driven
 	// denormalization). This ensures threads appear in the mailbox even when
@@ -1280,9 +1423,9 @@ func (vg *ViewsGroup) Mailbox(c echo.Context) error {
 	// association for threads that came from outputs but lack a task→row link.
 	rowThreadRows := make(map[string]*views.ViewRow)
 	{
-		seen := make(map[string]bool, len(threadIDs))
-		for _, tid := range threadIDs {
-			seen[tid] = true
+		seen := make(map[string]bool, len(threadRefs))
+		for _, ref := range threadRefs {
+			seen[threadRefKey(ref)] = true
 		}
 		for i := range cachedRows {
 			r := &cachedRows[i]
@@ -1291,34 +1434,35 @@ func (vg *ViewsGroup) Mailbox(c echo.Context) error {
 			if raw == "" {
 				continue
 			}
-			for _, tid := range strings.Split(raw, ",") {
-				tid = strings.TrimSpace(tid)
-				if tid == "" {
-					continue
+			rowRefs := threadRefsFromCellValue(raw, "")
+			if selectedIntegration != "all" {
+				rowRefs = threadRefsFromCellValue(raw, selectedIntegration)
+			}
+			for _, ref := range rowRefs {
+				key := threadRefKey(ref)
+				if !seen[key] {
+					threadRefs = append(threadRefs, ref)
+					seen[key] = true
 				}
-				if !seen[tid] {
-					threadIDs = append(threadIDs, tid)
-					seen[tid] = true
-				}
-				if rowThreadRows[tid] == nil {
-					rowThreadRows[tid] = r
+				if rowThreadRows[ref.Key()] == nil {
+					rowThreadRows[ref.Key()] = r
 				}
 			}
 		}
 	}
 
-	if len(outputs) == 0 && len(threadIDs) == 0 {
+	if len(outputs) == 0 && len(threadRefs) == 0 {
 		return SuccessResponse(c, map[string]any{
 			"threads":            map[string]any{},
 			"has_email_activity": false,
 		})
 	}
 
-	// Fetch Gmail threads.
+	// Fetch provider-backed email threads.
 	var emailThreads map[string][]views.ThreadMessage
-	if len(threadIDs) > 0 {
+	if len(threadRefs) > 0 {
 		fetcher := views.NewEmailThreadFetcher(vg.backend)
-		emailThreads = fetcher.FetchThreads(ctx, workspaceID, threadIDs)
+		emailThreads = fetcher.FetchThreads(ctx, workspaceID, threadRefs)
 	}
 	if synth := syntheticEmailThreads(outputs, emailThreads); len(synth) > 0 {
 		if emailThreads == nil {
@@ -1337,8 +1481,8 @@ func (vg *ViewsGroup) Mailbox(c echo.Context) error {
 	// Build output -> threadKey lookup so we can associate row data with threads.
 	outputThreadKey := make(map[string]string)
 	for _, o := range outputs {
-		if tid := emailOutputThreadID(o); tid != "" {
-			outputThreadKey[o.ID] = tid
+		if ref := emailOutputThreadRef(o); ref.ID != "" {
+			outputThreadKey[o.ID] = ref.Key()
 		} else {
 			outputThreadKey[o.ID] = "output:" + o.ID
 		}

@@ -306,7 +306,7 @@ func TestSyntheticEmailThreadsSkipsOutputsWhenRealThreadExists(t *testing.T) {
 		},
 	}
 	existing := map[string][]views.ThreadMessage{
-		"thread-1": {{
+		"gmail:thread-1": {{
 			ID:       "gmail-msg-1",
 			ThreadID: "thread-1",
 			Subject:  "A faster way to spin up dev environments",
@@ -341,6 +341,52 @@ func TestSyntheticEmailThreadsFallsBackWhenNoRealThreadExists(t *testing.T) {
 	}
 	if thread[0].ThreadID != "output:out-1" {
 		t.Fatalf("thread id = %q, want output:out-1", thread[0].ThreadID)
+	}
+}
+
+func TestEmailOutputThreadRefUsesOutlookConversationID(t *testing.T) {
+	output := &types.TaskOutput{
+		OutputType: types.TaskOutputTypeEmail,
+		Data: map[string]any{
+			"conversation_id": "conv-123",
+		},
+	}
+
+	ref := emailOutputThreadRef(output)
+	if got := ref.ID; got != "conv-123" {
+		t.Fatalf("thread ref id = %q, want conv-123", got)
+	}
+	if got := ref.Integration; got != string(types.SourceOutlook) {
+		t.Fatalf("thread ref integration = %q, want outlook", got)
+	}
+}
+
+func TestEmailOutputIntegrationPrefersExplicitMetadataOverURLInference(t *testing.T) {
+	output := &types.TaskOutput{
+		OutputType: types.TaskOutputTypeEmail,
+		Metadata: map[string]any{
+			"integration": "outlook",
+		},
+		Data: map[string]any{
+			"thread_id":  "thread-123",
+			"email_link": "https://mail.google.com/mail/u/0/#inbox/thread-123",
+		},
+	}
+
+	if got := emailOutputIntegration(output); got != string(types.SourceOutlook) {
+		t.Fatalf("integration = %q, want outlook", got)
+	}
+}
+
+func TestThreadRefsFromCellValueUsesProvidedIntegration(t *testing.T) {
+	refs := threadRefsFromCellValue("thread-a, thread-b, thread-a", string(types.SourceOutlook))
+	if got := len(refs); got != 2 {
+		t.Fatalf("thread ref count = %d, want 2", got)
+	}
+	for _, ref := range refs {
+		if got := ref.Integration; got != string(types.SourceOutlook) {
+			t.Fatalf("thread ref integration = %q, want outlook", got)
+		}
 	}
 }
 
@@ -401,4 +447,3 @@ func TestSyncNameDescriptionFallsBackToDefinition(t *testing.T) {
 		t.Fatalf("view.Definition.Name = %q, want %q", got, "Def name")
 	}
 }
-

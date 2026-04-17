@@ -100,9 +100,9 @@ var integrations = map[IntegrationName]IntegrationMeta{
 			CapabilitySourceWrite,
 		},
 		OAuthWriteScopeHint: []string{
-				"https://www.googleapis.com/auth/gmail.compose",
-				"https://www.googleapis.com/auth/gmail.modify",
-			},
+			"https://www.googleapis.com/auth/gmail.compose",
+			"https://www.googleapis.com/auth/gmail.modify",
+		},
 	},
 	Notion: {
 		Name:        Notion,
@@ -179,6 +179,19 @@ var integrations = map[IntegrationName]IntegrationMeta{
 		Capabilities: []IntegrationCapability{
 			CapabilitySourceRead,
 		},
+	},
+	Teams: {
+		Name:        Teams,
+		DisplayName: "Teams",
+		Description: "Chats, channels, and team messages",
+		Icon:        "messages-square",
+		AuthType:    AuthOAuth,
+		Scope:       ScopeShared,
+		Capabilities: []IntegrationCapability{
+			CapabilitySourceRead,
+			CapabilitySourceWrite,
+		},
+		OAuthWriteScopeHint: []string{"ChannelMessage.Send", "Chat.ReadWrite"},
 	},
 	Outlook: {
 		Name:        Outlook,
