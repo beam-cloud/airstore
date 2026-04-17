@@ -1,0 +1,34 @@
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.0",
+  "base_commit_sha": "58425658d713d8edfe050bbe4ed7bd79456885e3",
+  "prompts": {
+    "0692b3ef1890399b": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "838a2ae4-7041-438d-93f2-1ee9cfc196c7",
+        "model": "claude-opus-4-7"
+      },
+      "human_author": "Cooper",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 2,
+      "overriden_lines": 0
+    },
+    "b8c07eaa0a12a85f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6880ace1-5ca7-4b44-a7b4-ca1f505b6778",
+        "model": "claude-opus-4-7"
+      },
+      "human_author": "Cooper",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 158,
+      "overriden_lines": 0
+    }
+  }
+}
