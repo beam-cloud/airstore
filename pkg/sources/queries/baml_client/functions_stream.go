@@ -116,6 +116,80 @@ func (*stream) EvaluateGmailQueryResults(ctx context.Context, original_guidance 
 	return channel, nil
 }
 
+// / Streaming version of InferAgentMailQuery
+func (*stream) InferAgentMailQuery(ctx context.Context, name string, guidance *string, opts ...CallOptionFunc) (<-chan StreamValue[stream_types.AgentMailQueryResult, types.AgentMailQueryResult], error) {
+
+	var callOpts callOption
+	for _, opt := range opts {
+		opt(&callOpts)
+	}
+
+	args := baml.BamlFunctionArguments{
+		Kwargs: map[string]any{"name": name, "guidance": guidance},
+		Env:    getEnvVars(callOpts.env),
+	}
+
+	if callOpts.clientRegistry != nil {
+		args.ClientRegistry = callOpts.clientRegistry
+	}
+
+	if callOpts.collectors != nil {
+		args.Collectors = callOpts.collectors
+	}
+
+	if callOpts.typeBuilder != nil {
+		args.TypeBuilder = callOpts.typeBuilder
+	}
+
+	if callOpts.tags != nil {
+		args.Tags = callOpts.tags
+	}
+
+	encoded, err := args.Encode()
+	if err != nil {
+		// This should never happen. if it does, please file an issue at https://github.com/boundaryml/baml/issues
+		// and include the type of the args you're passing in.
+		wrapped_err := fmt.Errorf("BAML INTERNAL ERROR: InferAgentMailQuery: %w", err)
+		panic(wrapped_err)
+	}
+
+	internal_channel, err := bamlRuntime.CallFunctionStream(ctx, "InferAgentMailQuery", encoded, callOpts.onTick)
+	if err != nil {
+		return nil, err
+	}
+
+	channel := make(chan StreamValue[stream_types.AgentMailQueryResult, types.AgentMailQueryResult])
+	go func() {
+		for result := range internal_channel {
+			if result.Error != nil {
+				channel <- StreamValue[stream_types.AgentMailQueryResult, types.AgentMailQueryResult]{
+					IsError: true,
+					Error:   result.Error,
+				}
+				close(channel)
+				return
+			}
+			if result.HasData {
+				data := (result.Data).(types.AgentMailQueryResult)
+				channel <- StreamValue[stream_types.AgentMailQueryResult, types.AgentMailQueryResult]{
+					IsFinal:  true,
+					as_final: &data,
+				}
+			} else {
+				data := (result.StreamData).(stream_types.AgentMailQueryResult)
+				channel <- StreamValue[stream_types.AgentMailQueryResult, types.AgentMailQueryResult]{
+					IsFinal:   false,
+					as_stream: &data,
+				}
+			}
+		}
+
+		// when internal_channel is closed, close the output too
+		close(channel)
+	}()
+	return channel, nil
+}
+
 // / Streaming version of InferConfluenceQuery
 func (*stream) InferConfluenceQuery(ctx context.Context, name string, guidance *string, opts ...CallOptionFunc) (<-chan StreamValue[stream_types.ConfluenceQueryResult, types.ConfluenceQueryResult], error) {
 

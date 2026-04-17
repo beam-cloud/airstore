@@ -83,6 +83,12 @@ type ConfluenceFilter struct {
 	Label       string `json:"label"`
 }
 
+type AgentMailFilter struct {
+	Inbox   string `json:"inbox"`
+	From    string `json:"from"`
+	Subject string `json:"subject"`
+}
+
 type WebFilter struct {
 	Mode         string   `json:"mode"` // "map" or "search"
 	URL          string   `json:"url"`
@@ -117,6 +123,8 @@ func buildQuerySpecFromFilter(integration string, filter json.RawMessage, limit 
 		return buildConfluenceFilter(filter, limit)
 	case types.SourceWeb:
 		return buildWebFilter(filter, limit)
+	case types.SourceAgentMail:
+		return buildAgentMailFilter(filter, limit)
 	default:
 		return "", fmt.Errorf("unsupported integration for filter: %s", integration)
 	}
@@ -383,6 +391,25 @@ func buildConfluenceFilter(raw json.RawMessage, limit int) (string, error) {
 	spec := map[string]any{
 		"cql_query": cql,
 		"limit":     limit,
+	}
+	return marshalSpec(spec)
+}
+
+func buildAgentMailFilter(raw json.RawMessage, limit int) (string, error) {
+	var f AgentMailFilter
+	if err := json.Unmarshal(raw, &f); err != nil {
+		return "", err
+	}
+	var parts []string
+	if f.From != "" {
+		parts = append(parts, f.From)
+	}
+	if f.Subject != "" {
+		parts = append(parts, f.Subject)
+	}
+	spec := newSpec("agentmail", strings.Join(parts, " "), limit)
+	if f.Inbox != "" {
+		spec["inbox_filter"] = f.Inbox
 	}
 	return marshalSpec(spec)
 }

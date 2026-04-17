@@ -15,6 +15,50 @@ package type_builder
 
 import baml "github.com/boundaryml/baml/engine/language_client_go/pkg"
 
+type AgentMailQueryResultClassView struct {
+	inner baml.ClassBuilder
+}
+
+func (t *AgentMailQueryResultClassView) ListProperties() ([]ClassPropertyView, error) {
+	result, err := t.inner.ListProperties()
+	if err != nil {
+		return nil, err
+	}
+	builders := make([]ClassPropertyView, len(result))
+	for i, p := range result {
+		builders[i] = p
+	}
+	return builders, nil
+}
+
+func (t *AgentMailQueryResultClassView) PropertyAgentmail_query() (ClassPropertyView, error) {
+	return t.inner.Property("agentmail_query")
+}
+
+func (t *AgentMailQueryResultClassView) PropertyInbox_filter() (ClassPropertyView, error) {
+	return t.inner.Property("inbox_filter")
+}
+
+func (t *AgentMailQueryResultClassView) PropertyLimit() (ClassPropertyView, error) {
+	return t.inner.Property("limit")
+}
+
+func (t *AgentMailQueryResultClassView) PropertyFilename_format() (ClassPropertyView, error) {
+	return t.inner.Property("filename_format")
+}
+
+func (t *TypeBuilder) AgentMailQueryResult() (*AgentMailQueryResultClassView, error) {
+	bld, err := t.inner.Class("AgentMailQueryResult")
+	if err != nil {
+		return nil, err
+	}
+	return &AgentMailQueryResultClassView{inner: bld}, nil
+}
+
+func (t *AgentMailQueryResultClassView) Type() (baml.Type, error) {
+	return t.inner.Type()
+}
+
 type ConfluenceQueryResultClassView struct {
 	inner baml.ClassBuilder
 }

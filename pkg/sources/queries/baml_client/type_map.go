@@ -21,6 +21,8 @@ import (
 )
 
 var typeMap = map[string]reflect.Type{
+	"TYPES.AgentMailQueryResult":         reflect.TypeOf(types.AgentMailQueryResult{}),
+	"STREAM_TYPES.AgentMailQueryResult":  reflect.TypeOf(stream_types.AgentMailQueryResult{}),
 	"TYPES.ConfluenceQueryResult":        reflect.TypeOf(types.ConfluenceQueryResult{}),
 	"STREAM_TYPES.ConfluenceQueryResult": reflect.TypeOf(stream_types.ConfluenceQueryResult{}),
 	"TYPES.CronResult":                   reflect.TypeOf(types.CronResult{}),

@@ -106,6 +106,7 @@ type AgentMailMessage struct {
 	To        []string `json:"to"`
 	ReplyTo   []string `json:"reply_to"`
 	Subject   string   `json:"subject"`
+	Preview   string   `json:"preview"`
 	Text      string   `json:"text"`
 	HTML      string   `json:"html"`
 	CreatedAt string   `json:"created_at"`
@@ -116,9 +117,19 @@ type AgentMailThread struct {
 	Messages []AgentMailMessage `json:"messages"`
 }
 
-type agentMailListResponse[T any] struct {
-	Items     []T    `json:"items"`
-	NextToken string `json:"next_token"`
+type agentMailInboxListResponse struct {
+	Inboxes       []AgentMailInbox `json:"inboxes"`
+	NextPageToken string           `json:"next_page_token"`
+}
+
+type agentMailMessageListResponse struct {
+	Messages      []AgentMailMessage `json:"messages"`
+	NextPageToken string             `json:"next_page_token"`
+}
+
+type agentMailThreadListResponse struct {
+	Threads       []AgentMailThread `json:"threads"`
+	NextPageToken string            `json:"next_page_token"`
 }
 
 type SendMessageParams struct {
@@ -151,11 +162,11 @@ func (c *AgentMailClient) ListInboxes(ctx context.Context, limit int, pageToken 
 	if pageToken != "" {
 		q += "&page_token=" + url.QueryEscape(pageToken)
 	}
-	var resp agentMailListResponse[AgentMailInbox]
+	var resp agentMailInboxListResponse
 	if err := c.do(ctx, http.MethodGet, q, nil, &resp); err != nil {
 		return nil, "", fmt.Errorf("list inboxes: %w", err)
 	}
-	return resp.Items, resp.NextToken, nil
+	return resp.Inboxes, resp.NextPageToken, nil
 }
 
 // ListMessages returns messages in an inbox, newest first.
@@ -164,11 +175,11 @@ func (c *AgentMailClient) ListMessages(ctx context.Context, inboxID string, limi
 	if pageToken != "" {
 		q += "&page_token=" + url.QueryEscape(pageToken)
 	}
-	var resp agentMailListResponse[AgentMailMessage]
+	var resp agentMailMessageListResponse
 	if err := c.do(ctx, http.MethodGet, q, nil, &resp); err != nil {
 		return nil, "", fmt.Errorf("list messages: %w", err)
 	}
-	return resp.Items, resp.NextToken, nil
+	return resp.Messages, resp.NextPageToken, nil
 }
 
 // GetMessage returns a single message by ID.
@@ -186,11 +197,11 @@ func (c *AgentMailClient) ListThreads(ctx context.Context, inboxID string, limit
 	if pageToken != "" {
 		q += "&page_token=" + url.QueryEscape(pageToken)
 	}
-	var resp agentMailListResponse[AgentMailThread]
+	var resp agentMailThreadListResponse
 	if err := c.do(ctx, http.MethodGet, q, nil, &resp); err != nil {
 		return nil, "", fmt.Errorf("list threads: %w", err)
 	}
-	return resp.Items, resp.NextToken, nil
+	return resp.Threads, resp.NextPageToken, nil
 }
 
 // GetThread returns a thread with all its messages.

@@ -121,6 +121,8 @@ func DefaultFilenameFormat(integration string) string {
 		return "{date}_{from}_{subject}_{id}.txt"
 	case "web":
 		return "{title}_{id}.md"
+	case "agentmail":
+		return "{date}_{from}_{subject}_{id}.txt"
 	default:
 		return "{id}"
 	}

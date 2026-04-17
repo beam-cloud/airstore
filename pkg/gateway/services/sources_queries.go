@@ -336,7 +336,7 @@ func (s *SourceService) refreshQueryDefinition(
 // mapping in the source watch system.
 func extractCorrelationKey(integration string, metadata map[string]string) string {
 	switch types.SourceType(strings.ToLower(integration)) {
-	case types.SourceGmail:
+	case types.SourceGmail, types.SourceAgentMail:
 		return strings.TrimSpace(metadata["thread_id"])
 	default:
 		return strings.TrimSpace(metadata["id"])
@@ -1157,6 +1157,8 @@ func (s *SourceService) inferQuerySpec(ctx context.Context, integration, name, g
 		result, err = baml.InferConfluenceQuery(ctx, name, guidancePtr)
 	case types.SourceWeb:
 		result, err = baml.InferWebQuery(ctx, name, guidancePtr)
+	case types.SourceAgentMail:
+		result, err = baml.InferAgentMailQuery(ctx, name, guidancePtr)
 	default:
 		return "", "", fmt.Errorf("unsupported integration: %s", integration)
 	}
@@ -1332,6 +1334,8 @@ func parseQuerySpec(integration, querySpec string) sources.QuerySpec {
 		LinearQuery        string   `json:"linear_query"`
 		PostHogQuery       string   `json:"posthog_query"`
 		ConfluenceQuery    string   `json:"cql_query"`
+		AgentMailQuery     string   `json:"agentmail_query"`
+		InboxFilter        string   `json:"inbox_filter"`
 		WebQuery           string   `json:"web_query"`
 		WebMode            string   `json:"web_mode"`
 		IncludePaths       []string `json:"include_paths"`
@@ -1385,6 +1389,8 @@ func parseQuerySpec(integration, querySpec string) sources.QuerySpec {
 		query = spec.ConfluenceQuery
 	case types.SourceWeb:
 		query = spec.WebQuery
+	case types.SourceAgentMail:
+		query = spec.AgentMailQuery
 	}
 
 	filenameFormat := spec.FilenameFormat
@@ -1430,6 +1436,9 @@ func parseQuerySpec(integration, querySpec string) sources.QuerySpec {
 	}
 	if spec.CredentialMemberID != "" {
 		metadata[legacyQueryCredentialMemberIDKey] = strings.TrimSpace(spec.CredentialMemberID)
+	}
+	if spec.InboxFilter != "" {
+		metadata["inbox_filter"] = strings.TrimSpace(spec.InboxFilter)
 	}
 
 	return sources.QuerySpec{
@@ -1493,7 +1502,7 @@ func viewToProto(q *types.FilesystemQuery) *pb.SourceView {
 // empty query strings gracefully (i.e., return all items with no filter).
 func emptyQueryAllowed(integration string) bool {
 	switch types.SourceType(integration) {
-	case types.SourceLinear, types.SourcePostHog:
+	case types.SourceLinear, types.SourcePostHog, types.SourceAgentMail:
 		return true
 	default:
 		return false

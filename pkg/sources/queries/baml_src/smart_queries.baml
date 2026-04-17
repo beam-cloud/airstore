@@ -1060,6 +1060,57 @@ function InferConfluenceQuery(name: string, guidance: string?) -> ConfluenceQuer
 }
 
 // -----------------------------------------------------------------------------
+// AgentMail Query Inference
+// -----------------------------------------------------------------------------
+
+class AgentMailQueryResult {
+  agentmail_query string @description("Text filter to match against sender, subject, and body. Empty string = all messages (no filter).")
+  inbox_filter string @description("Specific inbox email address to query. Empty string = all inboxes.")
+  limit int @description("Max results to return (default: 50)")
+  filename_format string @description("Template for result filenames. Use {id}, {date}, {from}, {subject}, {inbox}. Example: {date}_{from}_{subject}_{id}.txt")
+}
+
+function InferAgentMailQuery(name: string, guidance: string?) -> AgentMailQueryResult {
+  client AnthropicClient
+  prompt #"
+    Convert a folder/file name into an AgentMail query.
+
+    AgentMail manages multiple email inboxes (each is an email address like agent@example.com).
+    The query is a simple text filter applied client-side against sender, subject, and body.
+    There is no server-side search — use simple keywords.
+
+    QUERY STRATEGY:
+    1. For general browsing (recent, all, inbox) → empty query, empty inbox_filter
+    2. For sender-specific → use the sender name/email as query text
+    3. For topic-specific → use topic keywords as query text
+    4. For inbox-specific → set inbox_filter to the inbox address if mentioned
+    5. AgentMail has no read/unread distinction — "unread" just means recent messages
+
+    DEFAULTS:
+    - agentmail_query: "" (all messages)
+    - inbox_filter: "" (all inboxes)
+    - limit: 50
+    - filename_format: {date}_{from}_{subject}_{id}.txt
+
+    Query examples:
+    - "recent-emails" → query: "", inbox_filter: ""
+    - "unread" → query: "", inbox_filter: ""
+    - "emails-from-john" → query: "john", inbox_filter: ""
+    - "support-emails" → query: "support", inbox_filter: ""
+    - "invoices" → query: "invoice", inbox_filter: ""
+    - "meeting-notes" → query: "meeting", inbox_filter: ""
+
+    Folder/file name: {{ name }}
+    {% if guidance %}
+
+    Additional guidance from user: {{ guidance }}
+    {% endif %}
+
+    {{ ctx.output_format }}
+  "#
+}
+
+// -----------------------------------------------------------------------------
 // Web Query Inference
 // -----------------------------------------------------------------------------
 
@@ -1184,5 +1235,41 @@ test TestConfluenceArchitectureDecisions {
   args {
     name "architecture-decisions"
     guidance "ADRs and architecture decision records"
+  }
+}
+
+// -----------------------------------------------------------------------------
+// AgentMail Query Tests
+// -----------------------------------------------------------------------------
+
+test TestAgentMailRecent {
+  functions [InferAgentMailQuery]
+  args {
+    name "recent-emails"
+    guidance null
+  }
+}
+
+test TestAgentMailFromJohn {
+  functions [InferAgentMailQuery]
+  args {
+    name "emails-from-john"
+    guidance null
+  }
+}
+
+test TestAgentMailInvoices {
+  functions [InferAgentMailQuery]
+  args {
+    name "invoices"
+    guidance null
+  }
+}
+
+test TestAgentMailWithGuidance {
+  functions [InferAgentMailQuery]
+  args {
+    name "support-emails"
+    guidance "emails about customer support issues"
   }
 }

@@ -72,6 +72,8 @@ func NewAgentMailProvider(client *clients.AgentMailClient) *AgentMailProvider {
 func (a *AgentMailProvider) Name() string { return types.AgentMail.String() }
 
 var _ sources.Provider = (*AgentMailProvider)(nil)
+var _ sources.QueryExecutor = (*AgentMailProvider)(nil)
+var _ sources.NativeBrowsable = (*AgentMailProvider)(nil)
 
 func (a *AgentMailProvider) checkClient() error {
 	if a.client == nil {
@@ -163,6 +165,165 @@ func (a *AgentMailProvider) Readlink(_ context.Context, _ *sources.ProviderConte
 
 func (a *AgentMailProvider) Search(_ context.Context, _ *sources.ProviderContext, _ string, _ int) ([]sources.SearchResult, error) {
 	return nil, sources.ErrSearchNotSupported
+}
+
+func (a *AgentMailProvider) IsNativeBrowsable() bool { return true }
+
+// ---------------------------------------------------------------------------
+// QueryExecutor interface
+// ---------------------------------------------------------------------------
+
+func (a *AgentMailProvider) ExecuteQuery(ctx context.Context, _ *sources.ProviderContext, spec sources.QuerySpec) (*sources.QueryResponse, error) {
+	if err := a.checkClient(); err != nil {
+		return nil, err
+	}
+
+	limit := spec.Limit
+	if limit <= 0 {
+		limit = 50
+	}
+
+	// Determine which inboxes to query.
+	inboxFilter := strings.TrimSpace(spec.Metadata["inbox_filter"])
+	var inboxIDs []string
+	if inboxFilter != "" {
+		inboxIDs = []string{inboxFilter}
+	} else {
+		inboxes, _, err := a.client.ListInboxes(ctx, 100, "")
+		if err != nil {
+			return nil, err
+		}
+		for _, inbox := range inboxes {
+			inboxIDs = append(inboxIDs, inbox.InboxID)
+		}
+	}
+
+	// Collect messages from all target inboxes.
+	var all []amMessage
+	for _, id := range inboxIDs {
+		msgs, err := a.getCachedMessages(ctx, id)
+		if err != nil {
+			continue
+		}
+		all = append(all, msgs...)
+	}
+
+	// Client-side text filter.
+	query := strings.TrimSpace(strings.ToLower(spec.Query))
+	if query != "" {
+		filtered := all[:0]
+		for _, m := range all {
+			if matchesQuery(m, query) {
+				filtered = append(filtered, m)
+			}
+		}
+		all = filtered
+	}
+
+	// Sort newest first.
+	sort.Slice(all, func(i, j int) bool {
+		return all[i].Timestamp.After(all[j].Timestamp)
+	})
+
+	if len(all) > limit {
+		all = all[:limit]
+	}
+
+	results := make([]sources.QueryResult, 0, len(all))
+	for _, m := range all {
+		metadata := map[string]string{
+			"id":      m.ID,
+			"date":    m.Timestamp.Format("2006-01-02"),
+			"from":    extractSenderName(m.From),
+			"to":      m.To,
+			"subject": m.Subject,
+			"inbox":   m.InboxID,
+		}
+		if m.ThreadID != "" {
+			metadata["thread_id"] = m.ThreadID
+		}
+		results = append(results, sources.QueryResult{
+			ID:       m.InboxID + ":" + m.ID,
+			Filename: a.FormatFilename(spec.FilenameFormat, metadata),
+			Metadata: metadata,
+			Mtime:    m.Timestamp.Unix(),
+		})
+	}
+
+	return &sources.QueryResponse{Results: results}, nil
+}
+
+func (a *AgentMailProvider) ReadResult(ctx context.Context, _ *sources.ProviderContext, resultID string) ([]byte, error) {
+	if err := a.checkClient(); err != nil {
+		return nil, err
+	}
+
+	inboxID, messageID, err := parseAgentMailResultID(resultID)
+	if err != nil {
+		return nil, err
+	}
+
+	msg, err := a.client.GetMessage(ctx, inboxID, messageID)
+	if err != nil {
+		return nil, err
+	}
+
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "From: %s\n", msg.From)
+	if len(msg.To) > 0 {
+		fmt.Fprintf(&sb, "To: %s\n", strings.Join(msg.To, ", "))
+	}
+	fmt.Fprintf(&sb, "Subject: %s\n", msg.Subject)
+	fmt.Fprintf(&sb, "Date: %s\n", msg.CreatedAt)
+	fmt.Fprintf(&sb, "Inbox: %s\n", msg.InboxID)
+	if msg.ThreadID != "" {
+		fmt.Fprintf(&sb, "Thread-ID: %s\n", msg.ThreadID)
+	}
+	sb.WriteString("\n")
+	sb.WriteString(msg.Text)
+	sb.WriteString("\n")
+
+	return []byte(sb.String()), nil
+}
+
+func (a *AgentMailProvider) FormatFilename(format string, metadata map[string]string) string {
+	if format == "" {
+		format = "{date}_{from}_{subject}_{id}.txt"
+	}
+
+	result := format
+	for key, value := range metadata {
+		placeholder := "{" + key + "}"
+		safeValue := sources.SanitizeFilename(value)
+		if key != "id" && len(safeValue) > 40 {
+			safeValue = safeValue[:40]
+		}
+		result = strings.ReplaceAll(result, placeholder, safeValue)
+	}
+
+	if result == "" || result == ".txt" {
+		if id, ok := metadata["id"]; ok {
+			result = id + ".txt"
+		} else {
+			result = "unknown.txt"
+		}
+	}
+
+	return result
+}
+
+func parseAgentMailResultID(resultID string) (inboxID, messageID string, err error) {
+	idx := strings.Index(resultID, ":")
+	if idx < 0 {
+		return "", "", fmt.Errorf("invalid agentmail result ID: %s", resultID)
+	}
+	return resultID[:idx], resultID[idx+1:], nil
+}
+
+func matchesQuery(m amMessage, query string) bool {
+	return strings.Contains(strings.ToLower(m.From), query) ||
+		strings.Contains(strings.ToLower(m.Subject), query) ||
+		strings.Contains(strings.ToLower(m.Text), query)
 }
 
 // ---------------------------------------------------------------------------
