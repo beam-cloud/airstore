@@ -12,6 +12,44 @@ type cacheAwareTestVNode struct {
 	vnode.ReadOnlyBase
 }
 
+type cacheAwareTestMetadata struct{}
+
+func (cacheAwareTestMetadata) GetDirectoryContentMetadata(id string) (*DirectoryContentMetadata, error) {
+	return &DirectoryContentMetadata{Id: id, EntryList: []string{}}, nil
+}
+
+func (cacheAwareTestMetadata) GetDirectoryAccessMetadata(pid, name string) (*DirectoryAccessMetadata, error) {
+	return nil, ErrNotFound
+}
+
+func (cacheAwareTestMetadata) GetFileMetadata(pid, name string) (*FileMetadata, error) {
+	return nil, ErrNotFound
+}
+
+func (cacheAwareTestMetadata) SaveDirectoryContentMetadata(meta *DirectoryContentMetadata) error {
+	return nil
+}
+
+func (cacheAwareTestMetadata) SaveDirectoryAccessMetadata(meta *DirectoryAccessMetadata) error {
+	return nil
+}
+
+func (cacheAwareTestMetadata) SaveFileMetadata(meta *FileMetadata) error {
+	return nil
+}
+
+func (cacheAwareTestMetadata) ListDirectory(path string) []DirEntry {
+	return nil
+}
+
+func (cacheAwareTestMetadata) RenameDirectory(oldPID, oldName, newPID, newName string, version int) error {
+	return nil
+}
+
+func (cacheAwareTestMetadata) DeleteDirectory(parentID, name string, version int) error {
+	return nil
+}
+
 func (n *cacheAwareTestVNode) Prefix() string { return "/pdfs" }
 
 func (n *cacheAwareTestVNode) Getattr(path string) (*vnode.FileInfo, error) {
@@ -66,5 +104,36 @@ func TestFilesystemGetattr_ReaddirHitClearsStaleNegative(t *testing.T) {
 	}
 	if _, ok := fs.negativeCache.Get(targetPath); ok {
 		t.Fatalf("expected stale negative cache entry for %s to be cleared", targetPath)
+	}
+}
+
+func TestFilesystemHiddenRoots(t *testing.T) {
+	fs := &Filesystem{
+		vnodes:        vnode.NewRegistry(),
+		metadata:      cacheAwareTestMetadata{},
+		dirChildren:   expirable.NewLRU[string, map[string]struct{}](16, nil, time.Minute),
+		negativeCache: expirable.NewLRU[string, struct{}](16, nil, time.Minute),
+		hiddenRoots:   normalizeHiddenRoots([]string{"/pdfs"}),
+	}
+	fs.vnodes.Register(&cacheAwareTestVNode{})
+
+	entries, err := fs.Readdir("/")
+	if err != nil {
+		t.Fatalf("expected root readdir success, got error: %v", err)
+	}
+	for _, entry := range entries {
+		if entry.Name == "pdfs" {
+			t.Fatalf("expected hidden root to be omitted from root readdir")
+		}
+	}
+
+	if _, err := fs.Getattr("/pdfs"); err == nil {
+		t.Fatalf("expected hidden root getattr to fail")
+	}
+	if _, err := fs.Getattr("/pdfs/test.pdf"); err == nil {
+		t.Fatalf("expected hidden child getattr to fail")
+	}
+	if _, err := fs.Readdir("/pdfs"); err == nil {
+		t.Fatalf("expected hidden root readdir to fail")
 	}
 }

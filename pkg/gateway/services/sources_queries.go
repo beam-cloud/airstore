@@ -734,6 +734,9 @@ func (s *SourceService) CreateView(ctx context.Context, req *pb.CreateViewReques
 		}
 		querySpec = s.refineQueryIfNeeded(ctx, req.Integration, req.Guidance, querySpec, filenameFormat)
 	}
+	if req.FilenameFormat != "" {
+		filenameFormat = req.FilenameFormat
+	}
 
 	var credentialMemberID *uint
 	if memberID := auth.MemberId(ctx); memberID != 0 {
@@ -751,7 +754,7 @@ func (s *SourceService) CreateView(ctx context.Context, req *pb.CreateViewReques
 		OutputFormat:       types.ViewOutputFormat(req.OutputFormat),
 		FileExt:            req.FileExt,
 		FilenameFormat:     filenameFormat,
-		CacheTTL:           0,
+		CacheTTL:           int(req.CacheTtl),
 		Mode:               mode,
 		Filter:             req.Filter,
 	}, false)
@@ -899,6 +902,23 @@ func (s *SourceService) UpdateView(ctx context.Context, req *pb.UpdateViewReques
 		if query.FileExt != "" {
 			query.Path += query.FileExt
 		}
+		needsUpdate = true
+	}
+	if req.FileExt != "" && req.FileExt != query.FileExt {
+		query.FileExt = req.FileExt
+		query.Path = types.PathSources + "/" + query.Integration + "/" + query.Name + query.FileExt
+		needsUpdate = true
+	}
+	if req.OutputFormat != "" && types.ViewOutputFormat(req.OutputFormat) != query.OutputFormat {
+		query.OutputFormat = types.ViewOutputFormat(req.OutputFormat)
+		needsUpdate = true
+	}
+	if req.FilenameFormat != "" && req.FilenameFormat != query.FilenameFormat {
+		query.FilenameFormat = req.FilenameFormat
+		needsUpdate = true
+	}
+	if int(req.CacheTtl) != query.CacheTTL {
+		query.CacheTTL = int(req.CacheTtl)
 		needsUpdate = true
 	}
 

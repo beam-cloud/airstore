@@ -48,12 +48,13 @@ type Config struct {
 	GatewayAddr string
 	Token       string
 	Verbose     bool
-	Uid         *uint32 // File owner uid (nil = use current user, 0 = root)
-	Gid         *uint32 // File owner gid (nil = use current user, 0 = root)
-	Backend     string  // "fuse", "nfs", or "" for platform auto-detect
-	Compression string  // compression strategy: "strip", "distill", "chain", or "" (disabled)
-	Session     string  // custom access session ID; defaults to workspace ID if empty
-	AccessLog   bool    // enable access logging; when false, no session header is sent
+	Uid         *uint32  // File owner uid (nil = use current user, 0 = root)
+	Gid         *uint32  // File owner gid (nil = use current user, 0 = root)
+	Backend     string   // "fuse", "nfs", or "" for platform auto-detect
+	Compression string   // compression strategy: "strip", "distill", "chain", or "" (disabled)
+	Session     string   // custom access session ID; defaults to workspace ID if empty
+	AccessLog   bool     // enable access logging; when false, no session header is sent
+	HiddenRoots []string // top-level root names to hide from this mount
 }
 
 // Filesystem connects to the gateway via gRPC and exposes a virtual filesystem.
@@ -87,6 +88,7 @@ type Filesystem struct {
 	accessCollector *AccessCollector
 	mountID         string
 	readSeq         uint64
+	hiddenRoots     map[string]struct{}
 }
 
 // LegacyMetadataEngine provides filesystem metadata operations via gRPC.
@@ -149,6 +151,7 @@ func NewFilesystem(cfg Config) (*Filesystem, error) {
 		backend:       NewBackend(backendName),
 		backendAuto:   backendAuto,
 		mountID:       fmt.Sprintf("mount-%d-%d", os.Getpid(), time.Now().UnixNano()),
+		hiddenRoots:   normalizeHiddenRoots(cfg.HiddenRoots),
 	}
 
 	if err := fs.initRoot(); err != nil {
@@ -377,6 +380,9 @@ func (f *Filesystem) Getattr(path string) (*FileInfo, error) {
 	if path == "/" {
 		return f.rootInfo(), nil
 	}
+	if f.isHiddenPath(path) {
+		return nil, ErrNotFound
+	}
 
 	// Extract basename via manual index scan — avoids filepath.Base allocation.
 	name := path
@@ -482,6 +488,10 @@ func (f *Filesystem) Opendir(path string) (FileHandle, error) {
 }
 
 func (f *Filesystem) Readdir(path string) ([]DirEntry, error) {
+	if f.isHiddenPath(path) {
+		return nil, ErrNotFound
+	}
+
 	// Check for virtual node match
 	if vn := f.vnodes.Match(path); vn != nil {
 		vnEntries, err := vn.Readdir(path)
@@ -553,6 +563,40 @@ func (f *Filesystem) cacheDirChildren(path string, entries []DirEntry) {
 	f.dirChildren.Add(path, names)
 }
 
+func normalizeHiddenRoots(roots []string) map[string]struct{} {
+	if len(roots) == 0 {
+		return nil
+	}
+	hidden := make(map[string]struct{}, len(roots))
+	for _, root := range roots {
+		name := strings.Trim(strings.TrimSpace(root), "/")
+		if name == "" || strings.Contains(name, "/") {
+			continue
+		}
+		hidden[name] = struct{}{}
+	}
+	return hidden
+}
+
+func (f *Filesystem) isHiddenRootName(name string) bool {
+	if len(f.hiddenRoots) == 0 {
+		return false
+	}
+	_, ok := f.hiddenRoots[strings.Trim(strings.TrimSpace(name), "/")]
+	return ok
+}
+
+func (f *Filesystem) isHiddenPath(path string) bool {
+	if path == "" || path == "/" || len(f.hiddenRoots) == 0 {
+		return false
+	}
+	name := strings.TrimPrefix(path, "/")
+	if i := strings.IndexByte(name, '/'); i >= 0 {
+		name = name[:i]
+	}
+	return f.isHiddenRootName(name)
+}
+
 func (f *Filesystem) readdirRoot() []DirEntry {
 	seen := make(map[string]bool)
 	entries := make([]DirEntry, 0)
@@ -561,7 +605,7 @@ func (f *Filesystem) readdirRoot() []DirEntry {
 	for _, vn := range f.vnodes.List() {
 		prefix := vn.Prefix()
 		name := strings.TrimPrefix(prefix, "/")
-		if name != "" && !strings.Contains(name, "/") && !seen[name] {
+		if name != "" && !strings.Contains(name, "/") && !seen[name] && !f.isHiddenRootName(name) {
 			if info, err := vn.Getattr(prefix); err == nil {
 				entries = append(entries, DirEntry{Name: name, Mode: info.Mode, Ino: info.Ino})
 				seen[name] = true
@@ -573,7 +617,7 @@ func (f *Filesystem) readdirRoot() []DirEntry {
 	if fb := f.vnodes.Fallback(); fb != nil {
 		if storageEntries, err := fb.Readdir("/"); err == nil {
 			for _, e := range storageEntries {
-				if !seen[e.Name] {
+				if !seen[e.Name] && !f.isHiddenRootName(e.Name) {
 					entries = append(entries, DirEntry{Name: e.Name, Mode: e.Mode, Ino: e.Ino})
 					seen[e.Name] = true
 				}
@@ -585,7 +629,7 @@ func (f *Filesystem) readdirRoot() []DirEntry {
 	content, err := f.metadata.GetDirectoryContentMetadata(f.rootID)
 	if err == nil {
 		for _, name := range content.EntryList {
-			if seen[name] {
+			if seen[name] || f.isHiddenRootName(name) {
 				continue
 			}
 			entryPath := "/" + name
@@ -605,6 +649,9 @@ func (f *Filesystem) readdirRoot() []DirEntry {
 func (f *Filesystem) Releasedir(path string, fh FileHandle) error { return nil }
 
 func (f *Filesystem) Open(path string, flags int) (FileHandle, error) {
+	if f.isHiddenPath(path) {
+		return 0, ErrNotFound
+	}
 	if vn := f.vnodes.MatchOrFallback(path); vn != nil {
 		fh, err := vn.Open(path, flags)
 		return FileHandle(fh), err
@@ -617,6 +664,9 @@ func (f *Filesystem) Open(path string, flags int) (FileHandle, error) {
 }
 
 func (f *Filesystem) Read(path string, buf []byte, off int64, fh FileHandle) (int, *vnode.ReadAttribution, error) {
+	if f.isHiddenPath(path) {
+		return 0, nil, ErrNotFound
+	}
 	if vn := f.vnodes.MatchOrFallback(path); vn != nil {
 		if n, ok := vn.(vnode.ReadAttributionNode); ok {
 			return n.ReadWithAttribution(path, buf, off, vnode.FileHandle(fh))
@@ -710,6 +760,9 @@ func (f *Filesystem) recordLogicalRead(
 }
 
 func (f *Filesystem) Release(path string, fh FileHandle) error {
+	if f.isHiddenPath(path) {
+		return ErrNotFound
+	}
 	if vn := f.vnodes.MatchOrFallback(path); vn != nil {
 		return vn.Release(path, vnode.FileHandle(fh))
 	}
@@ -732,6 +785,9 @@ func (f *Filesystem) onFileRemoved(path string) {
 
 // Write operations - delegate to vnodes or fallback storage
 func (f *Filesystem) Create(path string, flags int, mode uint32) (FileHandle, error) {
+	if f.isHiddenPath(path) {
+		return 0, ErrNotFound
+	}
 	if vn := f.vnodes.MatchOrFallback(path); vn != nil {
 		fh, err := vn.Create(path, flags, mode)
 		if err == nil {
@@ -743,6 +799,9 @@ func (f *Filesystem) Create(path string, flags int, mode uint32) (FileHandle, er
 }
 
 func (f *Filesystem) Write(path string, buf []byte, off int64, fh FileHandle) (int, error) {
+	if f.isHiddenPath(path) {
+		return 0, ErrNotFound
+	}
 	if vn := f.vnodes.MatchOrFallback(path); vn != nil {
 		return vn.Write(path, buf, off, vnode.FileHandle(fh))
 	}
@@ -750,6 +809,9 @@ func (f *Filesystem) Write(path string, buf []byte, off int64, fh FileHandle) (i
 }
 
 func (f *Filesystem) Truncate(path string, size int64, fh FileHandle) error {
+	if f.isHiddenPath(path) {
+		return ErrNotFound
+	}
 	if vn := f.vnodes.MatchOrFallback(path); vn != nil {
 		return vn.Truncate(path, size, vnode.FileHandle(fh))
 	}
@@ -757,6 +819,9 @@ func (f *Filesystem) Truncate(path string, size int64, fh FileHandle) error {
 }
 
 func (f *Filesystem) Mkdir(path string, mode uint32) error {
+	if f.isHiddenPath(path) {
+		return ErrNotFound
+	}
 	if vn := f.vnodes.MatchOrFallback(path); vn != nil {
 		if err := vn.Mkdir(path, mode); err != nil {
 			return err
@@ -768,6 +833,9 @@ func (f *Filesystem) Mkdir(path string, mode uint32) error {
 }
 
 func (f *Filesystem) Rmdir(path string) error {
+	if f.isHiddenPath(path) {
+		return ErrNotFound
+	}
 	if vn := f.vnodes.MatchOrFallback(path); vn != nil {
 		if err := vn.Rmdir(path); err != nil {
 			return err
@@ -779,6 +847,9 @@ func (f *Filesystem) Rmdir(path string) error {
 }
 
 func (f *Filesystem) Unlink(path string) error {
+	if f.isHiddenPath(path) {
+		return ErrNotFound
+	}
 	if vn := f.vnodes.MatchOrFallback(path); vn != nil {
 		if err := vn.Unlink(path); err != nil {
 			return err
@@ -790,6 +861,9 @@ func (f *Filesystem) Unlink(path string) error {
 }
 
 func (f *Filesystem) Rename(oldpath, newpath string) error {
+	if f.isHiddenPath(oldpath) || f.isHiddenPath(newpath) {
+		return ErrNotFound
+	}
 	oldVN := f.vnodes.MatchOrFallback(oldpath)
 	newVN := f.vnodes.MatchOrFallback(newpath)
 	if oldVN == nil || newVN == nil {
@@ -807,6 +881,9 @@ func (f *Filesystem) Rename(oldpath, newpath string) error {
 }
 
 func (f *Filesystem) Chmod(path string, mode uint32) error {
+	if f.isHiddenPath(path) {
+		return ErrNotFound
+	}
 	if vn := f.vnodes.MatchOrFallback(path); vn != nil {
 		if chmodNode, ok := vn.(vnode.ChmodNode); ok {
 			return chmodNode.Chmod(path, mode)
@@ -817,6 +894,9 @@ func (f *Filesystem) Chmod(path string, mode uint32) error {
 }
 
 func (f *Filesystem) Chown(path string, uid, gid uint32) error {
+	if f.isHiddenPath(path) {
+		return ErrNotFound
+	}
 	if vn := f.vnodes.MatchOrFallback(path); vn != nil {
 		return nil // No-op for vnodes
 	}
@@ -824,6 +904,9 @@ func (f *Filesystem) Chown(path string, uid, gid uint32) error {
 }
 
 func (f *Filesystem) Utimens(path string, atime, mtime *int64) error {
+	if f.isHiddenPath(path) {
+		return ErrNotFound
+	}
 	if vn := f.vnodes.MatchOrFallback(path); vn != nil {
 		return nil // No-op for vnodes
 	}
@@ -832,6 +915,9 @@ func (f *Filesystem) Utimens(path string, atime, mtime *int64) error {
 
 // Symlink operations
 func (f *Filesystem) Readlink(path string) (string, error) {
+	if f.isHiddenPath(path) {
+		return "", ErrNotFound
+	}
 	if vn := f.vnodes.MatchOrFallback(path); vn != nil {
 		return vn.Readlink(path)
 	}
@@ -841,6 +927,9 @@ func (f *Filesystem) Readlink(path string) (string, error) {
 func (f *Filesystem) Link(oldpath, newpath string) error { return ErrNotSupported }
 
 func (f *Filesystem) Symlink(target, newpath string) error {
+	if f.isHiddenPath(newpath) {
+		return ErrNotFound
+	}
 	if vn := f.vnodes.MatchOrFallback(newpath); vn != nil {
 		return vn.Symlink(target, newpath)
 	}
@@ -871,6 +960,9 @@ func (f *Filesystem) Listxattr(path string) ([]string, error) { return nil, nil 
 func (f *Filesystem) Flush(path string, fh FileHandle) error { return nil }
 
 func (f *Filesystem) Fsync(path string, datasync bool, fh FileHandle) error {
+	if f.isHiddenPath(path) {
+		return ErrNotFound
+	}
 	if vn := f.vnodes.MatchOrFallback(path); vn != nil {
 		return vn.Fsync(path, vnode.FileHandle(fh))
 	}

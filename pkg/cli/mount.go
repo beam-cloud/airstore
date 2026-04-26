@@ -41,6 +41,7 @@ var (
 	mountCompression string
 	mountSession     string
 	mountAccessLog   bool
+	mountHiddenRoots []string
 )
 
 var mountCommandLong = fmt.Sprintf(`Mount the Airstore virtual filesystem at the specified path.
@@ -68,6 +69,7 @@ func init() {
 	mountCmd.Flags().StringVar(&mountCompression, "compression", "", "Compression strategy: strip (omit to disable)")
 	mountCmd.Flags().StringVar(&mountSession, "session", "", "Custom access session ID for telemetry (default: workspace ID)")
 	mountCmd.Flags().BoolVar(&mountAccessLog, "access-log", true, "Enable access logging (default: true)")
+	mountCmd.Flags().StringArrayVar(&mountHiddenRoots, "hide-root", nil, "Hide a top-level virtual root from this mount (repeatable)")
 	rootCmd.AddCommand(mountCmd)
 }
 
@@ -159,6 +161,7 @@ func runMount(cmd *cobra.Command, args []string) error {
 			Compression: mountCompression,
 			Session:     mountSession,
 			AccessLog:   mountAccessLog,
+			HiddenRoots: mountHiddenRoots,
 		})
 		if err != nil {
 			return err

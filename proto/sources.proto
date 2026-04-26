@@ -156,6 +156,8 @@ message CreateViewRequest {
   string output_format = 4;    // "folder" or "file"
   string file_ext = 5;         // For files: ".json", ".md"
   string filter = 6;           // JSON structured filter (query mode)
+  string filename_format = 7;  // Optional result filename template
+  int32 cache_ttl = 8;         // Seconds, 0 = always live
 }
 
 message CreateViewResponse {
@@ -203,6 +205,10 @@ message UpdateViewRequest {
   string guidance = 3;           // New guidance (triggers re-inference of query_spec)
   string filter = 4;             // New structured filter JSON (query mode)
   string mode = 5;               // Explicit mode: "smart" or "query" (triggers mode switch)
+  string output_format = 6;      // Optional "folder" or "file"
+  string file_ext = 7;           // Optional file extension
+  string filename_format = 8;    // Optional result filename template
+  int32 cache_ttl = 9;           // Seconds, 0 = always live
 }
 
 message UpdateViewResponse {
