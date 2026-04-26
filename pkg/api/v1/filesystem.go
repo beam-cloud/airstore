@@ -2356,20 +2356,26 @@ func getManifestToolCount(manifest []byte) int {
 // CreateViewRequest represents a request to create a source view.
 // If Filter is non-empty, the view uses query mode; otherwise smart mode (LLM inference).
 type CreateViewRequest struct {
-	Integration  string          `json:"integration"`   // e.g., "gmail", "gdrive"
-	Name         string          `json:"name"`          // Folder/file name
-	Guidance     string          `json:"guidance"`      // Natural language guidance (smart mode)
-	Filter       json.RawMessage `json:"filter"`        // Structured filter JSON (query mode)
-	OutputFormat string          `json:"output_format"` // "folder" or "file" (default: "folder")
-	FileExt      string          `json:"file_ext"`      // For files: ".json", ".md"
+	Integration    string          `json:"integration"`     // e.g., "gmail", "gdrive"
+	Name           string          `json:"name"`            // Folder/file name
+	Guidance       string          `json:"guidance"`        // Natural language guidance (smart mode)
+	Filter         json.RawMessage `json:"filter"`          // Structured filter JSON (query mode)
+	OutputFormat   string          `json:"output_format"`   // "folder" or "file" (default: "folder")
+	FileExt        string          `json:"file_ext"`        // For files: ".json", ".md"
+	FilenameFormat string          `json:"filename_format"` // Optional result filename template
+	CacheTTL       int             `json:"cache_ttl"`       // Seconds, 0 = always live
 }
 
 // UpdateViewRequest represents a request to update a source view.
 type UpdateViewRequest struct {
-	Name     string          `json:"name"`     // New name (optional)
-	Guidance string          `json:"guidance"` // New guidance (optional)
-	Filter   json.RawMessage `json:"filter"`   // New filter (optional, query mode)
-	Mode     string          `json:"mode"`     // Explicit mode: "smart" or "query"
+	Name           string          `json:"name"`            // New name (optional)
+	Guidance       string          `json:"guidance"`        // New guidance (optional)
+	Filter         json.RawMessage `json:"filter"`          // New filter (optional, query mode)
+	Mode           string          `json:"mode"`            // Explicit mode: "smart" or "query"
+	OutputFormat   string          `json:"output_format"`   // Optional "folder" or "file"
+	FileExt        string          `json:"file_ext"`        // Optional file extension
+	FilenameFormat string          `json:"filename_format"` // Optional result filename template
+	CacheTTL       int             `json:"cache_ttl"`       // Seconds, 0 = always live
 }
 
 // ViewResponse represents a source view in API responses.
@@ -2414,12 +2420,14 @@ func (g *FilesystemGroup) CreateView(c echo.Context) error {
 	}
 
 	resp, err := g.sourceService.CreateView(ctx, &pb.CreateViewRequest{
-		Integration:  req.Integration,
-		Name:         req.Name,
-		Guidance:     req.Guidance,
-		Filter:       string(req.Filter),
-		OutputFormat: req.OutputFormat,
-		FileExt:      req.FileExt,
+		Integration:    req.Integration,
+		Name:           req.Name,
+		Guidance:       req.Guidance,
+		Filter:         string(req.Filter),
+		OutputFormat:   req.OutputFormat,
+		FileExt:        req.FileExt,
+		FilenameFormat: req.FilenameFormat,
+		CacheTtl:       int32(req.CacheTTL),
 	})
 	if err != nil {
 		log.Error().Err(err).Msg("failed to create source view")
@@ -2537,11 +2545,15 @@ func (g *FilesystemGroup) UpdateView(c echo.Context) error {
 	}
 
 	resp, err := g.sourceService.UpdateView(ctx, &pb.UpdateViewRequest{
-		ExternalId: externalId,
-		Name:       req.Name,
-		Guidance:   req.Guidance,
-		Filter:     string(req.Filter),
-		Mode:       req.Mode,
+		ExternalId:     externalId,
+		Name:           req.Name,
+		Guidance:       req.Guidance,
+		Filter:         string(req.Filter),
+		Mode:           req.Mode,
+		OutputFormat:   req.OutputFormat,
+		FileExt:        req.FileExt,
+		FilenameFormat: req.FilenameFormat,
+		CacheTtl:       int32(req.CacheTTL),
 	})
 	if err != nil {
 		log.Error().Err(err).Str("external_id", externalId).Msg("failed to update source view")
