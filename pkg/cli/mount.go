@@ -15,7 +15,6 @@ import (
 	"github.com/beam-cloud/airstore/pkg/filesystem"
 	"github.com/beam-cloud/airstore/pkg/filesystem/vnode"
 	"github.com/beam-cloud/airstore/pkg/filesystem/vnode/embed"
-	"github.com/beam-cloud/airstore/pkg/gateway"
 	"github.com/beam-cloud/airstore/pkg/types"
 	pb "github.com/beam-cloud/airstore/proto"
 	"github.com/charmbracelet/huh/spinner"
@@ -102,36 +101,16 @@ func runMount(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Check for local mode
-	var gw *gateway.Gateway
+	// Check for local mode. We intentionally do not auto-start an embedded
+	// gateway here: importing the gateway pulls in BAML query code and can spend
+	// tens of seconds downloading native libraries before remote mounts start.
+	// Local users should run `airstore start` separately.
 	effectiveGateway := gatewayAddr
 	mode := "remote"
 
 	if cm, err := common.NewConfigManager[types.AppConfig](); err == nil {
 		if cm.GetConfig().Mode == types.ModeLocal {
 			mode = "local"
-
-			err := withMaybeSpinner("Starting gateway...", func() error {
-				var err error
-				gw, err = gateway.NewGateway()
-				if err != nil {
-					return err
-				}
-				if err = gw.StartAsync(); err != nil {
-					return err
-				}
-				effectiveGateway = gw.GRPCAddr()
-				time.Sleep(100 * time.Millisecond)
-				return nil
-			})
-
-			if err != nil {
-				PrintFormattedError("Failed to start gateway", err)
-				return nil
-			}
-			if !mountDaemon {
-				PrintSuccessWithValue("Gateway ready", effectiveGateway)
-			}
 		}
 	}
 
@@ -216,9 +195,6 @@ func runMount(cmd *cobra.Command, args []string) error {
 	})
 
 	if err != nil {
-		if gw != nil {
-			gw.Shutdown()
-		}
 		if conn != nil {
 			conn.Close()
 		}
@@ -253,9 +229,6 @@ func runMount(cmd *cobra.Command, args []string) error {
 	case <-sig:
 		fmt.Println()
 		withMaybeSpinner("Unmounting...", func() error {
-			if gw != nil {
-				go gw.Shutdown()
-			}
 			unmount(mountPoint)
 			time.Sleep(200 * time.Millisecond)
 			return nil
@@ -275,10 +248,6 @@ func runMount(cmd *cobra.Command, args []string) error {
 		case <-time.After(3 * time.Second):
 			os.Exit(0)
 		}
-	}
-
-	if gw != nil {
-		gw.Shutdown()
 	}
 
 	if err != nil {

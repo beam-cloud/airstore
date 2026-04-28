@@ -14,6 +14,7 @@ import (
 	"github.com/beam-cloud/airstore/pkg/repository"
 	"github.com/beam-cloud/airstore/pkg/sources"
 	"github.com/beam-cloud/airstore/pkg/types"
+	pb "github.com/beam-cloud/airstore/proto"
 	"github.com/labstack/echo/v4"
 )
 
@@ -80,6 +81,59 @@ func TestFilesystemStatSupportsFolderQueryMetadataFiles(t *testing.T) {
 	}
 	if resp.Data.Size == 0 {
 		t.Fatalf("size = 0, want > 0")
+	}
+}
+
+func TestRootStorageEntriesIncludeFilesAndFilterReservedNames(t *testing.T) {
+	group := &FilesystemGroup{}
+
+	entries := group.rootStorageEntriesToVirtualFiles([]*pb.ContextDirEntry{
+		{Name: "reports", IsDir: true},
+		{Name: "summary.pdf", Size: 1234},
+		{Name: types.DirNameSkills, IsDir: true},
+		{Name: types.DirNameSources, IsDir: true},
+		nil,
+	})
+
+	if len(entries) != 2 {
+		t.Fatalf("expected 2 visible entries, got %d: %#v", len(entries), entries)
+	}
+
+	byName := map[string]types.VirtualFile{}
+	for _, entry := range entries {
+		byName[entry.Name] = entry
+	}
+
+	reports, ok := byName["reports"]
+	if !ok {
+		t.Fatal("expected reports folder to be visible")
+	}
+	if !reports.IsFolder {
+		t.Fatalf("reports is_folder = false, want true")
+	}
+	if reports.Path != "/reports" {
+		t.Fatalf("reports path = %q, want /reports", reports.Path)
+	}
+
+	file, ok := byName["summary.pdf"]
+	if !ok {
+		t.Fatal("expected summary.pdf file to be visible")
+	}
+	if file.IsFolder {
+		t.Fatalf("summary.pdf is_folder = true, want false")
+	}
+	if file.Path != "/summary.pdf" {
+		t.Fatalf("summary.pdf path = %q, want /summary.pdf", file.Path)
+	}
+	if file.Size != 1234 {
+		t.Fatalf("summary.pdf size = %d, want 1234", file.Size)
+	}
+
+	if _, ok := byName[types.DirNameSkills]; ok {
+		t.Fatalf("reserved root %q should be filtered", types.DirNameSkills)
+	}
+	if _, ok := byName[types.DirNameSources]; ok {
+		t.Fatalf("virtual root %q should be filtered", types.DirNameSources)
 	}
 }
 

@@ -1,3 +1,5 @@
+//go:build !mountlite
+
 package cli
 
 import (

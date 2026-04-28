@@ -820,18 +820,29 @@ func (g *FilesystemGroup) listRootDirectories(ctx context.Context) []types.Virtu
 		entries[1].ChildCount = len(g.sourceRegistry.List())
 	}
 
-	// Add user-created top-level folders from storage
+	// Add user-created top-level entries from storage.
 	if g.storageService != nil {
 		resp, err := g.storageService.ReadDir(ctx, &pb.ContextReadDirRequest{Path: "/"})
 		if err == nil && resp.Ok {
-			for _, e := range resp.Entries {
-				if e.IsDir && !types.IsReservedFolder(e.Name) && !types.IsVirtualFolder(e.Name) {
-					entries = append(entries, *types.NewRootFolder(e.Name, "/"+e.Name))
-				}
-			}
+			entries = append(entries, g.rootStorageEntriesToVirtualFiles(resp.Entries)...)
 		}
 	}
 
+	return entries
+}
+
+func (g *FilesystemGroup) rootStorageEntriesToVirtualFiles(storageEntries []*pb.ContextDirEntry) []types.VirtualFile {
+	entries := make([]types.VirtualFile, 0, len(storageEntries))
+	for _, e := range storageEntries {
+		if e == nil || types.IsReservedFolder(e.Name) || types.IsVirtualFolder(e.Name) {
+			continue
+		}
+		if e.IsDir {
+			entries = append(entries, *types.NewRootFolder(e.Name, "/"+e.Name))
+			continue
+		}
+		entries = append(entries, *g.storageEntryToVirtualFile(e, "/"))
+	}
 	return entries
 }
 
