@@ -115,7 +115,6 @@ func init() {
 	rootCmd.AddCommand(tokenCmd)
 	rootCmd.AddCommand(connectionCmd)
 	rootCmd.AddCommand(taskCmd)
-	rootCmd.AddCommand(hookCmd)
 }
 
 // Execute runs the CLI

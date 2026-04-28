@@ -1,3 +1,5 @@
+//go:build !mountlite
+
 package cli
 
 import (
@@ -479,4 +481,5 @@ func init() {
 	hookCmd.AddCommand(hookPauseCmd)
 	hookCmd.AddCommand(hookResumeCmd)
 	hookCmd.AddCommand(hookRunsCmd)
+	rootCmd.AddCommand(hookCmd)
 }
