@@ -17,6 +17,7 @@ import (
 )
 
 const tasksCacheTTL = 5 * time.Second
+const taskFileSentinelSize int64 = 10 << 20 // 10MB — must be large enough for FUSE/NFS to issue reads covering all content
 
 // TasksVNode provides /tasks directory listing tasks as files.
 // Each task appears as a file named {task_id}.task
@@ -35,14 +36,19 @@ type TasksVNode struct {
 	cacheMu     sync.RWMutex
 	cachedTasks []*types.AgentTask
 	cacheExpiry time.Time
+
+	// Cache for rendered task file sizes (populated after Read)
+	sizeCacheMu sync.RWMutex
+	sizeCache   map[string]int64
 }
 
 // NewTasksVNode creates a TasksVNode with database access for task listing.
 // Use this when the backend is available (e.g., in gateway).
 func NewTasksVNode(backend repository.BackendRepository, token string) *TasksVNode {
 	return &TasksVNode{
-		backend: backend,
-		token:   token,
+		backend:   backend,
+		token:     token,
+		sizeCache: make(map[string]int64),
 	}
 }
 
@@ -53,6 +59,7 @@ func NewTasksVNodeGRPC(conn *grpc.ClientConn, token string) *TasksVNode {
 		grpcConn:    conn,
 		token:       token,
 		bearerToken: BearerToken(token),
+		sizeCache:   make(map[string]int64),
 	}
 	go t.warmCache()
 	return t
@@ -63,6 +70,17 @@ func (t *TasksVNode) warmCache() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	t.getTasks(ctx)
+}
+
+// taskFileSize returns the cached rendered size for a task, or the sentinel size if not yet cached.
+func (t *TasksVNode) taskFileSize(taskId string) int64 {
+	t.sizeCacheMu.RLock()
+	if size, ok := t.sizeCache[taskId]; ok {
+		t.sizeCacheMu.RUnlock()
+		return size
+	}
+	t.sizeCacheMu.RUnlock()
+	return taskFileSentinelSize
 }
 
 func (t *TasksVNode) Prefix() string { return TasksPath }
@@ -302,8 +320,8 @@ func (t *TasksVNode) Getattr(path string) (*FileInfo, error) {
 		return nil, err
 	}
 
-	// Task file - return file info
-	info := NewFileInfo(PathIno(path), 0, 0644)
+	// Task file - return file info (use cached size if available)
+	info := NewFileInfo(PathIno(path), t.taskFileSize(task.ExternalId), 0644)
 	if task.CreatedAt.Unix() > 0 {
 		info.Mtime = task.CreatedAt
 		info.Ctime = task.CreatedAt
@@ -333,7 +351,7 @@ func (t *TasksVNode) Readdir(path string) ([]DirEntry, error) {
 			Name:  name,
 			Mode:  syscall.S_IFREG | 0644,
 			Ino:   PathIno(TasksPath + "/" + name),
-			Size:  0, // Size unknown until read
+			Size:  t.taskFileSize(task.ExternalId),
 			Mtime: mtime,
 		})
 	}
@@ -404,6 +422,13 @@ func (t *TasksVNode) Read(path string, buf []byte, off int64, fh FileHandle) (in
 	}
 
 	data := []byte(content.String())
+
+	// Cache rendered size for terminal tasks (complete/failed/cancelled)
+	if task.IsTerminal() {
+		t.sizeCacheMu.Lock()
+		t.sizeCache[task.ExternalId] = int64(len(data))
+		t.sizeCacheMu.Unlock()
+	}
 
 	// Handle offset
 	if off >= int64(len(data)) {
