@@ -17,6 +17,7 @@ import (
 )
 
 const tasksCacheTTL = 5 * time.Second
+const taskFileSentinelSize int64 = 10 << 20 // 10MB — must be large enough for FUSE/NFS to issue reads covering all content
 
 // TasksVNode provides /tasks directory listing tasks as files.
 // Each task appears as a file named {task_id}.task
@@ -303,7 +304,7 @@ func (t *TasksVNode) Getattr(path string) (*FileInfo, error) {
 	}
 
 	// Task file - return file info
-	info := NewFileInfo(PathIno(path), 0, 0644)
+	info := NewFileInfo(PathIno(path), taskFileSentinelSize, 0644)
 	if task.CreatedAt.Unix() > 0 {
 		info.Mtime = task.CreatedAt
 		info.Ctime = task.CreatedAt
@@ -333,7 +334,7 @@ func (t *TasksVNode) Readdir(path string) ([]DirEntry, error) {
 			Name:  name,
 			Mode:  syscall.S_IFREG | 0644,
 			Ino:   PathIno(TasksPath + "/" + name),
-			Size:  0, // Size unknown until read
+			Size:  taskFileSentinelSize,
 			Mtime: mtime,
 		})
 	}
